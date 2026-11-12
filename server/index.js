@@ -20,6 +20,19 @@ const MAX_AGE = 120 * 24 * 60 * 60;
 const E164 = /^\+[1-9]\d{7,14}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const scrypt = promisify(crypto.scrypt);
+const CHEMISTRY_OPTIONS = {
+  connectionPace: ['slow-and-steady', 'balanced', 'spontaneous'],
+  communication: ['thoughtful-texts', 'voice-notes', 'face-to-face'],
+  socialEnergy: ['cozy-and-quiet', 'a-little-of-both', 'always-out'],
+  conflictStyle: ['talk-it-through', 'take-a-breather', 'write-it-out'],
+  affection: ['kind-words', 'quality-time', 'little-actions'],
+  idealWeekend: ['slow-morning', 'outside-adventure', 'city-night'],
+};
+const CHEMISTRY_LABELS = {
+  connectionPace: { 'slow-and-steady': 'slow-and-steady', balanced: 'balanced', spontaneous: 'spontaneous' },
+  communication: { 'thoughtful-texts': 'thoughtful texter', 'voice-notes': 'voice-note lover', 'face-to-face': 'in-person communicator' },
+  socialEnergy: { 'cozy-and-quiet': 'cozy at heart', 'a-little-of-both': 'socially balanced', 'always-out': 'always up for a plan' },
+};
 
 if (JWT_SECRET.length < 32) throw new Error('JWT_SECRET must contain at least 32 characters.');
 if (!DATABASE_URL) throw new Error('DATABASE_URL is required.');
@@ -71,6 +84,27 @@ function cleanText(value, max, fallback = '') {
 function cleanList(value, maxItems = 12, maxLength = 40) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.filter((item) => typeof item === 'string').map((item) => item.trim().slice(0, maxLength)).filter(Boolean))].slice(0, maxItems);
+}
+
+function cleanChemistryAnswers(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const answers = {};
+  for (const [question, options] of Object.entries(CHEMISTRY_OPTIONS)) {
+    if (!options.includes(value[question])) return null;
+    answers[question] = value[question];
+  }
+  return answers;
+}
+
+function buildPersonalityTwin(answers) {
+  return `Your Personality Twin is ${CHEMISTRY_LABELS.connectionPace[answers.connectionPace]}, a ${CHEMISTRY_LABELS.communication[answers.communication]}, and ${CHEMISTRY_LABELS.socialEnergy[answers.socialEnergy]}. You tend to feel most connected when people respect your pace and make room for honest, comfortable conversation.`;
+}
+
+function scoreMutualComfort(left, right) {
+  if (!left || !right || !Object.keys(CHEMISTRY_OPTIONS).every((key) => left[key] && right[key])) return null;
+  const keys = Object.keys(CHEMISTRY_OPTIONS);
+  const aligned = keys.filter((key) => left[key] === right[key]).length;
+  return Math.round(50 + (aligned / keys.length) * 50);
 }
 
 function preferencesAllow(preferences, gender) {
@@ -145,7 +179,8 @@ async function loadProfile(userId) {
     SELECT user_id AS id, display_name AS "displayName", birth_date AS "birthDate",
       date_part('year', age(birth_date))::int AS age,
       gender, interested_in AS "interestedIn", relationship_goal AS "relationshipGoal",
-      city, bio, interests, photo_url AS "photoUrl", updated_at AS "updatedAt"
+      city, bio, interests, photo_url AS "photoUrl", chemistry_answers AS "chemistryAnswers",
+      personality_twin AS "personalityTwin", updated_at AS "updatedAt"
     FROM profiles WHERE user_id = $1`, [userId]);
   return rows[0] || null;
 }
@@ -201,6 +236,27 @@ app.post('/api/auth/password', authLimiter, async (req, res, next) => {
   } catch (error) { return next(error); }
 });
 
+app.get('/api/chemistry', requireAuth, async (req, res, next) => {
+  try {
+    const profile = await loadProfile(req.userId);
+    if (!profile) return jsonError(res, 409, 'Create your profile before taking the Chemistry Test.');
+    return res.json({ answers: profile.chemistryAnswers || {}, personalityTwin: profile.personalityTwin || '' });
+  } catch (error) { return next(error); }
+});
+
+app.put('/api/chemistry', requireAuth, writeLimiter, async (req, res, next) => {
+  const answers = cleanChemistryAnswers(req.body?.answers);
+  if (!answers) return jsonError(res, 400, 'Answer each Chemistry Test question to continue.');
+  try {
+    const twin = buildPersonalityTwin(answers);
+    const { rowCount } = await pool.query(`
+      UPDATE profiles SET chemistry_answers=$2::jsonb, personality_twin=$3, updated_at=now()
+      WHERE user_id=$1`, [req.userId, JSON.stringify(answers), twin]);
+    if (!rowCount) return jsonError(res, 409, 'Create your profile before saving your Chemistry Test.');
+    return res.json({ answers, personalityTwin: twin });
+  } catch (error) { return next(error); }
+});
+
 app.get('/api/me', requireAuth, async (req, res, next) => {
   try {
     const profile = await loadProfile(req.userId);
@@ -247,7 +303,7 @@ app.get('/api/profiles', requireAuth, async (req, res, next) => {
       SELECT p.user_id AS id, p.display_name AS "displayName",
         date_part('year', age(p.birth_date))::int AS age,
         p.gender, p.relationship_goal AS "relationshipGoal", p.city, p.bio,
-        p.interests, p.photo_url AS "photoUrl"
+        p.interests, p.photo_url AS "photoUrl", p.chemistry_answers AS "chemistryAnswers"
       FROM profiles p
       WHERE p.user_id <> $1
         AND (cardinality($2::text[]) = 0 OR 'Everyone' = ANY($2::text[]) OR
@@ -260,7 +316,11 @@ app.get('/api/profiles', requireAuth, async (req, res, next) => {
         AND NOT EXISTS (SELECT 1 FROM matches m WHERE (m.user_a=$1 AND m.user_b=p.user_id) OR (m.user_a=p.user_id AND m.user_b=$1))
         AND ($4 = '' OR concat_ws(' ', p.display_name, p.city, p.relationship_goal, p.bio, array_to_string(p.interests, ' ')) ILIKE '%' || $4 || '%')
       ORDER BY p.updated_at DESC LIMIT $5`, [req.userId, me.interestedIn, me.gender, search, limit]);
-    return res.json({ profiles: rows });
+    const profiles = rows.map(({ chemistryAnswers, ...profile }) => ({
+      ...profile,
+      compatibilityScore: scoreMutualComfort(me.chemistryAnswers, chemistryAnswers),
+    })).sort((a, b) => (b.compatibilityScore || 0) - (a.compatibilityScore || 0));
+    return res.json({ profiles });
   } catch (error) { return next(error); }
 });
 

@@ -1,6 +1,6 @@
 # Kindred backend
 
-Kindred includes a Node.js API, PostgreSQL schema, phone-number and password accounts, persisted profiles/likes/matches/messages, and authenticated Socket.IO channels for chat and WebRTC signaling. Passwords are hashed with Node's scrypt implementation. Phone numbers are used as account IDs but are not SMS-verified.
+Kindred includes a Node.js API, PostgreSQL schema, phone-number and password accounts, persisted profiles/likes/matches/messages, a six-question Digital Chemistry Test, generated Personality Twin summaries, and mutual-comfort compatibility scoring. Passwords are hashed with Node's scrypt implementation. Phone numbers are used as account IDs but are not SMS-verified. Compatibility currently uses transparent answer-alignment scoring; it is not a trained machine-learning model.
 
 ## Local setup
 
@@ -24,6 +24,8 @@ All protected endpoints require `Authorization: Bearer <token>`. Phone numbers u
 | --- | --- | --- |
 | `GET` | `/api/health` | Health check |
 | `POST` | `/api/auth/password` | Create an account or sign in: `{ "phone": "+14155552671", "password": "...", "mode": "register" }` or `"login"` |
+| `GET` | `/api/chemistry` | Get the signed-in user's chemistry answers and Personality Twin |
+| `PUT` | `/api/chemistry` | Save the six Chemistry Test answers and generate a Personality Twin |
 | `GET` | `/api/me` | Get the signed-in user's profile |
 | `PUT` | `/api/profile` | Create/update profile; requires date of birth, gender, interests, relationship goal |
 | `GET` | `/api/profiles?search=...` | Find mutually compatible adults; optional search/limit |

@@ -19,9 +19,14 @@ CREATE TABLE IF NOT EXISTS profiles (
   bio text NOT NULL DEFAULT '' CHECK (char_length(bio) <= 500),
   interests text[] NOT NULL DEFAULT '{}',
   photo_url text NOT NULL DEFAULT '' CHECK (char_length(photo_url) <= 2048),
+  chemistry_answers jsonb NOT NULL DEFAULT '{}'::jsonb,
+  personality_twin text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS chemistry_answers jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS personality_twin text NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS likes (
   from_user uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
