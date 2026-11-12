@@ -13,6 +13,10 @@ const sampleChats = {
 };
 const image = (id,w=700) => String(id||'').startsWith('https://') ? id : `https://images.unsplash.com/${id}?auto=format&fit=crop&w=${w}&q=85`;
 const app = document.getElementById('app');
+const profileEmojis=['🧑🏻‍🦱','🧑🏼‍🎨','🧑🏽‍🚀','🧑🏾‍💻','🧑🏿‍🎤','🧑🏼‍🦰','🧑🏻‍🔧','🧑🏽‍🌾','🧑🏾‍🎧','🧑🏿‍🍳','🌈','✨','🦋','🪩','🌻','🎨'];
+function addProfileEmojiBadges(){app.querySelectorAll('.person-card > img,.person-tile > img').forEach(img=>{const card=img.parentElement;if(!card||card.querySelector(':scope > .profile-emoji'))return;const key=img.alt||img.src||'kindred';let hash=0;for(const char of key)hash=(hash*31+char.codePointAt(0))>>>0;const badge=document.createElement('span');badge.className='profile-emoji';badge.textContent=profileEmojis[hash%profileEmojis.length];badge.setAttribute('aria-label','Profile emoji');card.append(badge)})}
+new MutationObserver(addProfileEmojiBadges).observe(app,{childList:true,subtree:true});
+addProfileEmojiBadges();
 let state = JSON.parse(localStorage.getItem('kindred-state')||'null') || {stage:'login',tab:'discover',index:0,liked:[],passed:[],chats:sampleChats,selectedChat:'maya',filters:false};
 const BACKEND_ENABLED = window.KINDRED_CONFIG?.backend === true;
 const apiToken = () => sessionStorage.getItem('kindred-token') || '';
