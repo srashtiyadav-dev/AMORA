@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { promisify } = require('node:util');
 const fs = require('node:fs');
 const path = require('node:path');
 require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
@@ -18,6 +19,7 @@ const DATABASE_URL = process.env.DATABASE_URL || '';
 const MAX_AGE = 120 * 24 * 60 * 60;
 const E164 = /^\+[1-9]\d{7,14}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const scrypt = promisify(crypto.scrypt);
 
 if (JWT_SECRET.length < 32) throw new Error('JWT_SECRET must contain at least 32 characters.');
 if (!DATABASE_URL) throw new Error('DATABASE_URL is required.');
@@ -124,32 +126,18 @@ function requireAuth(req, res, next) {
   return next();
 }
 
-function compareTwilioCredentials() {
-  const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN } = process.env;
-  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !process.env.TWILIO_VERIFY_SERVICE_SID) {
-    const error = new Error('Phone sign-in is not configured. Add Twilio Verify credentials.');
-    error.status = 503;
-    throw error;
-  }
-  return `Basic ${Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64')}`;
+async function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  const derived = await scrypt(password, salt, 64);
+  return `scrypt$${salt.toString('base64url')}$${derived.toString('base64url')}`;
 }
 
-async function twilioVerify(pathPart, fields) {
-  const auth = compareTwilioCredentials();
-  const url = `https://verify.twilio.com/v2/Services/${encodeURIComponent(process.env.TWILIO_VERIFY_SERVICE_SID)}/${pathPart}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { Authorization: auth, 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams(fields),
-    signal: AbortSignal.timeout(12_000),
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(response.status === 429 ? 'Too many verification attempts. Wait before trying again.' : 'Phone verification service could not complete the request.');
-    error.status = response.status === 429 ? 429 : 502;
-    throw error;
-  }
-  return body;
+async function verifyPassword(password, stored) {
+  const [algorithm, saltText, hashText] = (stored || '').split('$');
+  if (algorithm !== 'scrypt' || !saltText || !hashText) return false;
+  const expected = Buffer.from(hashText, 'base64url');
+  const actual = await scrypt(password, Buffer.from(saltText, 'base64url'), expected.length);
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
 
 async function loadProfile(userId) {
@@ -182,27 +170,33 @@ async function runSchema() {
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 
-app.post('/api/auth/start', authLimiter, async (req, res, next) => {
+app.post('/api/auth/password', authLimiter, async (req, res, next) => {
   const phone = cleanText(req.body?.phone, 24);
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const mode = req.body?.mode;
   if (!E164.test(phone)) return jsonError(res, 400, 'Use an international phone number such as +14155552671.');
+  if (password.length < 12 || password.length > 128) return jsonError(res, 400, 'Use a password between 12 and 128 characters.');
+  if (mode !== 'register' && mode !== 'login') return jsonError(res, 400, 'Choose sign in or create account.');
   try {
-    await twilioVerify('Verifications', { To: phone, Channel: 'sms' });
-    return res.json({ ok: true, message: 'Verification code sent.' });
-  } catch (error) { return next(error); }
-});
-
-app.post('/api/auth/verify', authLimiter, async (req, res, next) => {
-  const phone = cleanText(req.body?.phone, 24);
-  const code = cleanText(req.body?.code, 10);
-  if (!E164.test(phone) || !/^\d{4,10}$/.test(code)) return jsonError(res, 400, 'Enter a valid phone number and verification code.');
-  try {
-    const result = await twilioVerify('VerificationCheck', { To: phone, Code: code });
-    if (result.status !== 'approved') return jsonError(res, 401, 'That code is invalid or has expired.');
-    const { rows } = await pool.query(`
-      INSERT INTO users (phone_e164) VALUES ($1)
-      ON CONFLICT (phone_e164) DO UPDATE SET last_seen_at = now()
-      RETURNING id`, [phone]);
-    const userId = rows[0].id;
+    const existing = await pool.query('SELECT id, password_hash FROM users WHERE phone_e164 = $1', [phone]);
+    let userId;
+    if (mode === 'register') {
+      if (existing.rowCount) return jsonError(res, 409, 'An account already uses this number. Sign in instead.');
+      const passwordHash = await hashPassword(password);
+      try {
+        const result = await pool.query('INSERT INTO users (phone_e164, password_hash) VALUES ($1, $2) RETURNING id', [phone, passwordHash]);
+        userId = result.rows[0].id;
+      } catch (error) {
+        if (error.code === '23505') return jsonError(res, 409, 'An account already uses this number. Sign in instead.');
+        throw error;
+      }
+    } else {
+      if (!existing.rowCount || !await verifyPassword(password, existing.rows[0].password_hash)) {
+        return jsonError(res, 401, 'Phone number or password is incorrect.');
+      }
+      userId = existing.rows[0].id;
+      await pool.query('UPDATE users SET last_seen_at = now() WHERE id = $1', [userId]);
+    }
     return res.json({ token: issueToken(userId), profile: await loadProfile(userId) });
   } catch (error) { return next(error); }
 });
