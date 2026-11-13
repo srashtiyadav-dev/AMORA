@@ -28,6 +28,7 @@ const CHEMISTRY_OPTIONS = {
   affection: ['kind-words', 'quality-time', 'little-actions'],
   idealWeekend: ['slow-morning', 'outside-adventure', 'city-night'],
 };
+const PROFILE_AVATARS = ['🧑🏻‍🎤','🧑🏼‍🎨','🧑🏽‍🚀','🧑🏾‍💻','🧑🏿‍🎤','🧑🏼‍🦰','🧑🏻‍🔧','🧑🏽‍🌾','🧑🏾‍🎧','🧑🏿‍🍳','🧑🏻‍🦱','🧑🏽‍🦰'];
 const CHEMISTRY_LABELS = {
   connectionPace: { 'slow-and-steady': 'slow-and-steady', balanced: 'balanced', spontaneous: 'spontaneous' },
   communication: { 'thoughtful-texts': 'thoughtful texter', 'voice-notes': 'voice-note lover', 'face-to-face': 'in-person communicator' },
@@ -179,7 +180,7 @@ async function loadProfile(userId) {
     SELECT user_id AS id, display_name AS "displayName", birth_date AS "birthDate",
       date_part('year', age(birth_date))::int AS age,
       gender, interested_in AS "interestedIn", relationship_goal AS "relationshipGoal",
-      city, bio, interests,
+      city, bio, interests, avatar,
       CASE WHEN EXISTS (SELECT 1 FROM profile_photos pp WHERE pp.user_id=profiles.user_id)
         THEN '/api/profiles/' || profiles.user_id::text || '/photo' ELSE photo_url END AS "photoUrl",
       chemistry_answers AS "chemistryAnswers",
@@ -267,6 +268,16 @@ app.get('/api/me', requireAuth, async (req, res, next) => {
   } catch (error) { return next(error); }
 });
 
+app.put('/api/profile/avatar', requireAuth, writeLimiter, async (req, res, next) => {
+  const avatar = typeof req.body?.avatar === 'string' ? req.body.avatar : null;
+  if (avatar === null || (avatar !== '' && !PROFILE_AVATARS.includes(avatar))) return jsonError(res, 400, 'Choose one of the available avatars.');
+  try {
+    const { rowCount } = await pool.query('UPDATE profiles SET avatar=$2, updated_at=now() WHERE user_id=$1', [req.userId, avatar]);
+    if (!rowCount) return jsonError(res, 409, 'Create your profile before choosing an avatar.');
+    return res.json({ profile: await loadProfile(req.userId) });
+  } catch (error) { return next(error); }
+});
+
 app.put('/api/profile', requireAuth, writeLimiter, async (req, res, next) => {
   const body = req.body || {};
   const displayName = cleanText(body.displayName, 40);
@@ -311,6 +322,7 @@ app.put('/api/profile/photo', requireAuth, writeLimiter,
         INSERT INTO profile_photos (user_id,mime_type,photo_data) VALUES ($1,$2,$3)
         ON CONFLICT (user_id) DO UPDATE SET mime_type=EXCLUDED.mime_type,
           photo_data=EXCLUDED.photo_data, updated_at=now()`, [req.userId, mimeType, photo]);
+      await pool.query("UPDATE profiles SET avatar='',updated_at=now() WHERE user_id=$1", [req.userId]);
       return res.json({ photoUrl: `/api/profiles/${req.userId}/photo` });
     } catch (error) { return next(error); }
   });
@@ -336,7 +348,7 @@ app.get('/api/profiles', requireAuth, async (req, res, next) => {
       SELECT p.user_id AS id, p.display_name AS "displayName",
         date_part('year', age(p.birth_date))::int AS age,
         p.gender, p.relationship_goal AS "relationshipGoal", p.city, p.bio,
-        p.interests,
+        p.interests, p.avatar,
         CASE WHEN EXISTS (SELECT 1 FROM profile_photos pp WHERE pp.user_id=p.user_id)
           THEN '/api/profiles/' || p.user_id::text || '/photo' ELSE p.photo_url END AS "photoUrl",
         p.chemistry_answers AS "chemistryAnswers"
@@ -410,7 +422,7 @@ app.get('/api/matches', requireAuth, async (req, res, next) => {
     const { rows } = await pool.query(`
       SELECT m.id, m.created_at AS "createdAt", p.user_id AS "profileId",
         p.display_name AS "displayName", date_part('year', age(p.birth_date))::int AS age,
-        p.city,
+        p.city, p.avatar,
         CASE WHEN EXISTS (SELECT 1 FROM profile_photos pp WHERE pp.user_id=p.user_id)
           THEN '/api/profiles/' || p.user_id::text || '/photo' ELSE p.photo_url END AS "photoUrl",
         p.relationship_goal AS "relationshipGoal",

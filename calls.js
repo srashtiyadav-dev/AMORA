@@ -288,7 +288,7 @@ async function startKindredCall(person, mediaType, matchId) {
     await joinCallRoom(socket, matchId);
     await acquireCallMedia(call);
     createCallPeer(call);
-    const started = await sendCallSignal(socket, matchId, 'start', { mediaType: call.mediaType, name: state.profile?.name || 'Your match', photoUrl: state.profile?.img || '' });
+    const started = await sendCallSignal(socket, matchId, 'start', { mediaType: call.mediaType, name: state.profile?.name || 'Your match', photoUrl: state.profile?.avatar ? avatarImage(state.profile.avatar) : state.profile?.img || '' });
     call.callId = started.callId;
     call.ringTimer = setTimeout(() => {
       if (activeKindredCall === call && !call.answered) {
@@ -365,7 +365,7 @@ function initializeProfilePhotoUpload() {
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error || 'Could not upload that photo.');
       const freshPhotoUrl = `${result.photoUrl}?v=${Date.now()}`;
-      state.profile = { ...(state.profile || {}), img: freshPhotoUrl, photoUrl: freshPhotoUrl };
+      state.profile = { ...(state.profile || {}), img: freshPhotoUrl, photoUrl: freshPhotoUrl, avatar: '' };
       save();
       renderProfile(document.getElementById('view'));
       notify('Your profile photo was updated.');
