@@ -11,6 +11,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash text;
 CREATE TABLE IF NOT EXISTS profiles (
   user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   display_name text NOT NULL CHECK (char_length(display_name) BETWEEN 1 AND 40),
+  occupation text NOT NULL DEFAULT '' CHECK (char_length(occupation) <= 80),
   birth_date date NOT NULL CHECK (birth_date <= (current_date - interval '18 years')::date),
   gender text NOT NULL CHECK (char_length(gender) BETWEEN 1 AND 40),
   interested_in text[] NOT NULL DEFAULT '{}',
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS occupation text NOT NULL DEFAULT '';
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS chemistry_answers jsonb NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS personality_twin text NOT NULL DEFAULT '';
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS avatar text NOT NULL DEFAULT '';
@@ -34,6 +36,23 @@ CREATE TABLE IF NOT EXISTS profile_photos (
   user_id uuid PRIMARY KEY REFERENCES profiles(user_id) ON DELETE CASCADE,
   mime_type text NOT NULL CHECK (mime_type IN ('image/jpeg','image/png','image/webp')),
   photo_data bytea NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS profile_gallery_photos (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES profiles(user_id) ON DELETE CASCADE,
+  mime_type text NOT NULL CHECK (mime_type IN ('image/jpeg','image/png','image/webp')),
+  photo_data bytea NOT NULL CHECK (octet_length(photo_data) <= 819200),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS profile_gallery_user_created_idx ON profile_gallery_photos(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS profile_voice_intros (
+  user_id uuid PRIMARY KEY REFERENCES profiles(user_id) ON DELETE CASCADE,
+  mime_type text NOT NULL CHECK (mime_type IN ('audio/webm','audio/ogg','audio/mp4','audio/mpeg')),
+  audio_data bytea NOT NULL CHECK (octet_length(audio_data) <= 3145728),
+  duration_seconds integer NOT NULL CHECK (duration_seconds BETWEEN 1 AND 60),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 

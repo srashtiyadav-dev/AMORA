@@ -181,7 +181,7 @@ async function loadProfile(userId) {
   const { rows } = await pool.query(`
     SELECT user_id AS id, display_name AS "displayName", birth_date AS "birthDate",
       date_part('year', age(birth_date))::int AS age,
-      gender, interested_in AS "interestedIn", relationship_goal AS "relationshipGoal",
+      occupation, gender, interested_in AS "interestedIn", relationship_goal AS "relationshipGoal",
       city, bio, interests, avatar,
       CASE WHEN EXISTS (SELECT 1 FROM profile_photos pp WHERE pp.user_id=profiles.user_id)
         THEN '/api/profiles/' || profiles.user_id::text || '/photo' ELSE photo_url END AS "photoUrl",
@@ -216,7 +216,7 @@ app.post('/api/auth/password', authLimiter, async (req, res, next) => {
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
   const mode = req.body?.mode;
   if (!E164.test(phone)) return jsonError(res, 400, 'Use an international phone number such as +14155552671.');
-  if (password.length < 12 || password.length > 128) return jsonError(res, 400, 'Use a password between 12 and 128 characters.');
+  if (password.length < 6 || password.length > 128) return jsonError(res, 400, 'Use a password between 6 and 128 characters.');
   if (mode !== 'register' && mode !== 'login') return jsonError(res, 400, 'Choose sign in or create account.');
   try {
     const existing = await pool.query('SELECT id, password_hash FROM users WHERE phone_e164 = $1', [phone]);
@@ -293,6 +293,7 @@ app.put('/api/profile/location', requireAuth, writeLimiter, async (req, res, nex
 app.put('/api/profile', requireAuth, writeLimiter, async (req, res, next) => {
   const body = req.body || {};
   const displayName = cleanText(body.displayName, 40);
+  const occupation = cleanText(body.occupation, 80);
   const birthDate = cleanText(body.birthDate, 10);
   const age = ageFromBirthDate(birthDate);
   const gender = cleanText(body.gender, 40);
@@ -307,14 +308,14 @@ app.put('/api/profile', requireAuth, writeLimiter, async (req, res, next) => {
   if (photoUrl && !/^https:\/\/images\.unsplash\.com\//i.test(photoUrl)) return jsonError(res, 400, 'Profile photos must use the approved HTTPS image host.');
   try {
     await pool.query(`
-      INSERT INTO profiles (user_id, display_name, birth_date, gender, interested_in, relationship_goal, city, bio, interests, photo_url)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      INSERT INTO profiles (user_id, display_name, birth_date, occupation, gender, interested_in, relationship_goal, city, bio, interests, photo_url)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
       ON CONFLICT (user_id) DO UPDATE SET
         display_name=EXCLUDED.display_name, birth_date=EXCLUDED.birth_date,
-        gender=EXCLUDED.gender, interested_in=EXCLUDED.interested_in,
+        occupation=EXCLUDED.occupation, gender=EXCLUDED.gender, interested_in=EXCLUDED.interested_in,
         relationship_goal=EXCLUDED.relationship_goal, city=EXCLUDED.city,
         bio=EXCLUDED.bio, interests=EXCLUDED.interests, photo_url=EXCLUDED.photo_url,
-        updated_at=now()`, [req.userId, displayName, birthDate, gender, interestedIn, relationshipGoal, city, bio, interests, photoUrl]);
+        updated_at=now()`, [req.userId, displayName, birthDate, occupation, gender, interestedIn, relationshipGoal, city, bio, interests, photoUrl]);
     return res.json({ profile: await loadProfile(req.userId) });
   } catch (error) { return next(error); }
 });
@@ -339,6 +340,56 @@ app.put('/api/profile/photo', requireAuth, writeLimiter,
     } catch (error) { return next(error); }
   });
 
+
+app.get('/api/profile/media', requireAuth, async(req,res,next)=>{
+  try { const {rows:photos}=await pool.query(`SELECT id,created_at AS "createdAt",'/api/profiles/' || user_id::text || '/gallery/' || id::text AS url FROM profile_gallery_photos WHERE user_id=$1 ORDER BY created_at DESC`,[req.userId]);const {rowCount}=await pool.query('SELECT 1 FROM profile_voice_intros WHERE user_id=$1',[req.userId]);return res.json({photos,hasVoiceIntro:rowCount>0}); }
+  catch(error){return next(error)}
+});
+
+app.post('/api/profile/gallery', requireAuth, writeLimiter,
+  express.raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: '800kb' }),
+  async (req, res, next) => {
+    const mimeType=req.get('content-type')?.split(';')[0].trim().toLowerCase(), photo=req.body;
+    if (!['image/jpeg','image/png','image/webp'].includes(mimeType) || !Buffer.isBuffer(photo) || photo.length<1) return jsonError(res,400,'Choose a JPEG, PNG, or WebP photo.');
+    try {
+      const { rows: existing }=await pool.query('SELECT count(*)::int AS count FROM profile_gallery_photos WHERE user_id=$1',[req.userId]);
+      if (existing[0].count>=12) return jsonError(res,409,'Your photo gallery can hold up to 12 photos.');
+      const { rows }=await pool.query('INSERT INTO profile_gallery_photos (user_id,mime_type,photo_data) VALUES ($1,$2,$3) RETURNING id,created_at AS "createdAt"',[req.userId,mimeType,photo]);
+      return res.status(201).json({photo:{...rows[0],url:`/api/profiles/${req.userId}/gallery/${rows[0].id}`}});
+    } catch(error){return next(error)}
+  });
+
+app.delete('/api/profile/gallery/:photoId', requireAuth, writeLimiter, async (req,res,next)=>{
+  const photoId=req.params.photoId.toLowerCase();
+  if(!UUID.test(photoId)) return jsonError(res,400,'Choose a valid photo.');
+  try { const {rowCount}=await pool.query('DELETE FROM profile_gallery_photos WHERE id=$1 AND user_id=$2',[photoId,req.userId]); if(!rowCount)return jsonError(res,404,'Photo not found.'); return res.status(204).end(); }
+  catch(error){return next(error)}
+});
+
+app.get('/api/profiles/:profileId/gallery/:photoId', async (req,res,next)=>{
+  const {profileId,photoId}=req.params;
+  if(!UUID.test(profileId)||!UUID.test(photoId))return jsonError(res,404,'Photo not found.');
+  try { const {rows}=await pool.query('SELECT mime_type,photo_data FROM profile_gallery_photos WHERE id=$1 AND user_id=$2',[photoId,profileId]); if(!rows.length)return jsonError(res,404,'Photo not found.'); res.set({'Content-Type':rows[0].mime_type,'Cache-Control':'private, no-cache, must-revalidate','X-Content-Type-Options':'nosniff'}); return res.send(rows[0].photo_data); }
+  catch(error){return next(error)}
+});
+
+app.put('/api/profile/voice-intro', requireAuth, writeLimiter,
+  express.raw({type:['audio/webm','audio/ogg','audio/mp4','audio/mpeg'],limit:'3mb'}),
+  async(req,res,next)=>{
+    const mimeType=req.get('content-type')?.split(';')[0].trim().toLowerCase(), audio=req.body, duration=Number(req.get('x-audio-duration'));
+    if(!['audio/webm','audio/ogg','audio/mp4','audio/mpeg'].includes(mimeType)||!Buffer.isBuffer(audio)||audio.length<1)return jsonError(res,400,'Record an audio intro in a supported format.');
+    if(!Number.isInteger(duration)||duration<1||duration>60)return jsonError(res,400,'Voice introductions must be 1 to 60 seconds.');
+    try { const {rowCount}=await pool.query('SELECT 1 FROM profiles WHERE user_id=$1',[req.userId]);if(!rowCount)return jsonError(res,409,'Create your profile before adding a voice intro.');await pool.query(`INSERT INTO profile_voice_intros(user_id,mime_type,audio_data,duration_seconds) VALUES($1,$2,$3,$4) ON CONFLICT(user_id) DO UPDATE SET mime_type=EXCLUDED.mime_type,audio_data=EXCLUDED.audio_data,duration_seconds=EXCLUDED.duration_seconds,updated_at=now()`,[req.userId,mimeType,audio,duration]);return res.json({voiceIntroUrl:`/api/profiles/${req.userId}/voice-intro`,durationSeconds:duration}); }
+    catch(error){return next(error)}
+  });
+
+app.delete('/api/profile/voice-intro', requireAuth, writeLimiter, async(req,res,next)=>{try{await pool.query('DELETE FROM profile_voice_intros WHERE user_id=$1',[req.userId]);return res.status(204).end()}catch(error){return next(error)}});
+
+app.get('/api/profiles/:profileId/voice-intro', async(req,res,next)=>{
+  const profileId=req.params.profileId.toLowerCase();if(!UUID.test(profileId))return jsonError(res,404,'Voice intro not found.');
+  try{const {rows}=await pool.query('SELECT mime_type,audio_data FROM profile_voice_intros WHERE user_id=$1',[profileId]);if(!rows.length)return jsonError(res,404,'Voice intro not found.');res.set({'Content-Type':rows[0].mime_type,'Cache-Control':'private, no-cache, must-revalidate','X-Content-Type-Options':'nosniff'});return res.send(rows[0].audio_data)}catch(error){return next(error)}
+});
+
 app.get('/api/profiles/:profileId/photo', async (req, res, next) => {
   const profileId = req.params.profileId.toLowerCase();
   if (!UUID.test(profileId)) return jsonError(res, 404, 'Photo not found.');
@@ -359,8 +410,11 @@ app.get('/api/profiles', requireAuth, async (req, res, next) => {
     const { rows } = await pool.query(`
       SELECT p.user_id AS id, p.display_name AS "displayName",
         date_part('year', age(p.birth_date))::int AS age,
-        p.gender, p.relationship_goal AS "relationshipGoal", p.city, p.bio,
+        p.gender, p.relationship_goal AS "relationshipGoal", p.city, p.bio, p.occupation,
         p.interests, p.avatar,
+        (SELECT COALESCE(json_agg(json_build_object('id',g.id,'url','/api/profiles/' || p.user_id::text || '/gallery/' || g.id::text) ORDER BY g.created_at DESC),'[]'::json)
+          FROM profile_gallery_photos g WHERE g.user_id=p.user_id) AS "galleryPhotos",
+        EXISTS (SELECT 1 FROM profile_voice_intros vi WHERE vi.user_id=p.user_id) AS "hasVoiceIntro",
         CASE WHEN EXISTS (SELECT 1 FROM profile_photos pp WHERE pp.user_id=p.user_id)
           THEN '/api/profiles/' || p.user_id::text || '/photo' ELSE p.photo_url END AS "photoUrl",
         p.chemistry_answers AS "chemistryAnswers"

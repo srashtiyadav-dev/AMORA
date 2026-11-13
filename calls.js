@@ -6,7 +6,7 @@ const CALL_ICE_SERVERS = [
 ];
 
 let kindredCallSocket = null;
-let activeKindredCall = null;
+let activeAMORACall = null;
 const joinedCallMatches = new Set();
 let matchSyncPromise = null;
 
@@ -51,17 +51,17 @@ async function syncCallRooms(socket) {
   return matchSyncPromise;
 }
 
-function initializeKindredCallPresence() {
+function initializeAMORACallPresence() {
   if (!BACKEND_ENABLED || !apiToken() || typeof apiSocket !== 'function') return;
   const socket = apiSocket();
   if (socket !== kindredCallSocket) {
     kindredCallSocket = socket;
     joinedCallMatches.clear();
-    socket.off('call:signal', receiveKindredCallSignal);
-    socket.on('call:signal', receiveKindredCallSignal);
+    socket.off('call:signal', receiveAMORACallSignal);
+    socket.on('call:signal', receiveAMORACallSignal);
     if (!socket.kindredMessageAlertsAttached) {
       socket.kindredMessageAlertsAttached = true;
-      socket.on('message:new', handleKindredMessage);
+      socket.on('message:new', handleAMORAMessage);
     }
     socket.on('connect', () => { joinedCallMatches.clear(); syncCallRooms(socket).catch(() => {}); });
     socket.on('disconnect', () => joinedCallMatches.clear());
@@ -69,8 +69,8 @@ function initializeKindredCallPresence() {
   if (socket.connected) syncCallRooms(socket).catch(() => {});
 }
 
-function handleKindredMessage(message) {
-  if (message?.senderId !== state.profile?.id) showKindredNotification('New Kindred message', message?.body || 'You have a new message.', `message-${message?.id || Date.now()}`);
+function handleAMORAMessage(message) {
+  if (message?.senderId !== state.profile?.id) showAMORANotification('New AMORA message', message?.body || 'You have a new message.', `message-${message?.id || Date.now()}`);
   if (state.tab === 'messages' && state.selectedChat === message?.matchId) {
     const view = document.getElementById('view');
     if (view) renderApiMessages(view, { preserveScroll: true });
@@ -78,11 +78,11 @@ function handleKindredMessage(message) {
 }
 
 function setCallStatus(message) {
-  if (activeKindredCall?.statusElement?.isConnected) activeKindredCall.statusElement.textContent = message;
+  if (activeAMORACall?.statusElement?.isConnected) activeAMORACall.statusElement.textContent = message;
 }
 
 function startCallDuration(call) {
-  if (call.durationTimer || activeKindredCall !== call) return;
+  if (call.durationTimer || activeAMORACall !== call) return;
   call.connectedAt = Date.now();
   const update = () => {
     const elapsed = Math.floor((Date.now() - call.connectedAt) / 1000);
@@ -92,7 +92,7 @@ function startCallDuration(call) {
   call.durationTimer = setInterval(update, 1000);
 }
 
-function showKindredNotification(title, body, tag) {
+function showAMORANotification(title, body, tag) {
   if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
     try {
       const popup = new Notification(title, { body, tag, icon: '/favicon.ico' });
@@ -101,7 +101,7 @@ function showKindredNotification(title, body, tag) {
   } else if (!document.hidden && typeof notify === 'function') notify(`${title}: ${body}`);
 }
 
-async function requestKindredNotifications() {
+async function requestAMORANotifications() {
   if (!('Notification' in window)) return notify('This browser does not support notifications.');
   if (Notification.permission === 'granted') return notify('Browser notifications are already enabled.');
   if (Notification.permission === 'denied') return notify('Notifications are blocked in browser settings.');
@@ -116,7 +116,7 @@ function renderCallModal(call, incoming = false) {
   const modal = document.createElement('div');
   modal.className = 'modal-backdrop call-backdrop';
   modal.innerHTML = `<section class="call-window" role="dialog" aria-modal="true" aria-label="${isVideo ? 'Video' : 'Voice'} call with ${escapeHtml(call.personName)}">
-    <header class="call-window-head"><div><div class="eyebrow">${incoming ? 'Incoming' : 'Kindred'} ${isVideo ? 'video' : 'voice'} call</div><h2>${escapeHtml(call.personName)}</h2></div><button class="selfie-close" data-call-end aria-label="End call">×</button></header>
+    <header class="call-window-head"><div><div class="eyebrow">${incoming ? 'Incoming' : 'AMORA'} ${isVideo ? 'video' : 'voice'} call</div><h2>${escapeHtml(call.personName)}</h2></div><button class="selfie-close" data-call-end aria-label="End call">×</button></header>
     <div class="call-stage ${isVideo ? 'video-stage' : 'voice-stage'}">
       <video class="call-remote-video" autoplay playsinline ${isVideo ? '' : 'hidden'}></video>
       <div class="call-avatar ${isVideo ? 'video-placeholder' : ''}">${call.personPhoto ? `<img src="${escapeHtml(call.personPhoto)}" alt="">` : `<span>${escapeHtml(call.personName.slice(0,1).toUpperCase())}</span>`}</div>
@@ -132,9 +132,9 @@ function renderCallModal(call, incoming = false) {
   call.localVideo = modal.querySelector('.call-local-video');
   call.remoteAudio = modal.querySelector('.call-remote-audio');
   call.statusElement = modal.querySelector('.call-status');
-  modal.querySelectorAll('[data-call-end]').forEach((button) => button.addEventListener('click', () => endKindredCall(true, 'ended')));
-  modal.querySelector('[data-call-decline]')?.addEventListener('click', () => endKindredCall(true, 'declined'));
-  modal.querySelector('[data-call-accept]')?.addEventListener('click', acceptKindredCall);
+  modal.querySelectorAll('[data-call-end]').forEach((button) => button.addEventListener('click', () => endAMORACall(true, 'ended')));
+  modal.querySelector('[data-call-decline]')?.addEventListener('click', () => endAMORACall(true, 'declined'));
+  modal.querySelector('[data-call-accept]')?.addEventListener('click', acceptAMORACall);
   modal.querySelector('[data-call-mute]')?.addEventListener('click', toggleCallMute);
   modal.querySelector('[data-call-camera]')?.addEventListener('click', toggleCallCamera);
 }
@@ -146,13 +146,13 @@ function createCallPeer(call) {
   call.pendingIce = call.pendingIce || [];
   for (const track of call.localStream.getTracks()) peer.addTrack(track, call.localStream);
   peer.onicecandidate = ({ candidate }) => {
-    if (candidate && activeKindredCall === call) {
+    if (candidate && activeAMORACall === call) {
       sendCallSignal(call.socket, call.matchId, 'ice', candidate.toJSON(), call.callId).catch(() => {});
     }
   };
   peer.ontrack = ({ streams }) => {
     const [stream] = streams;
-    if (!stream || activeKindredCall !== call) return;
+    if (!stream || activeAMORACall !== call) return;
     if (call.mediaType === 'video') {
       call.modal.querySelector('.call-avatar')?.setAttribute('hidden', '');
       call.remoteVideo.srcObject = stream;
@@ -194,8 +194,8 @@ async function applyRemoteOffer(call) {
   setCallStatus('Calling…');
 }
 
-async function acceptKindredCall() {
-  const call = activeKindredCall;
+async function acceptAMORACall() {
+  const call = activeAMORACall;
   if (!call || !call.incoming || call.accepted) return;
   const acceptButton = call.modal.querySelector('[data-call-accept]');
   if (acceptButton) acceptButton.disabled = true;
@@ -205,25 +205,25 @@ async function acceptKindredCall() {
     call.modal.querySelector('.call-controls').innerHTML = `<button class="call-control-btn" data-call-mute><span class="call-control-icon">🎙</span><span>Mute mic</span></button>${call.mediaType === 'video' ? '<button class="call-control-btn" data-call-camera><span class="call-control-icon">▣</span><span>Camera off</span></button>' : ''}<button class="call-control-btn danger" data-call-end><span class="call-control-icon">☎</span><span>End call</span></button>`;
     call.modal.querySelector('[data-call-mute]').onclick = toggleCallMute;
     call.modal.querySelector('[data-call-camera]')?.addEventListener('click', toggleCallCamera);
-    call.modal.querySelector('[data-call-end]').onclick = () => endKindredCall(true, 'ended');
+    call.modal.querySelector('[data-call-end]').onclick = () => endAMORACall(true, 'ended');
     setCallStatus('Joining call…');
     await sendCallSignal(call.socket, call.matchId, 'ready', {}, call.callId);
     await applyRemoteOffer(call);
   } catch (error) {
     notify(error.message || 'Could not access your microphone or camera.');
-    await endKindredCall(true, 'declined');
+    await endAMORACall(true, 'declined');
   }
 }
 
-function receiveKindredCallSignal(message) {
+function receiveAMORACallSignal(message) {
   if (!message?.matchId || !message?.type) return;
   if (message.type === 'start') {
-    showKindredNotification('Incoming call', `${cleanCallName(message.data?.name)} is calling you.`, `call-${message.callId||message.matchId}`);
-    if (activeKindredCall) {
+    showAMORANotification('Incoming call', `${cleanCallName(message.data?.name)} is calling you.`, `call-${message.callId||message.matchId}`);
+    if (activeAMORACall) {
       sendCallSignal(kindredCallSocket, message.matchId, 'end', { reason: 'busy' }, message.callId).catch(() => {});
       return;
     }
-    activeKindredCall = {
+    activeAMORACall = {
       matchId: message.matchId,
       callId: message.callId,
       socket: kindredCallSocket,
@@ -235,10 +235,10 @@ function receiveKindredCallSignal(message) {
       from: message.from,
       pendingIce: [],
     };
-    renderCallModal(activeKindredCall, true);
+    renderCallModal(activeAMORACall, true);
     return;
   }
-  const call = activeKindredCall;
+  const call = activeAMORACall;
   if (!call || call.matchId !== message.matchId || call.from && call.from !== message.from) return;
   if (message.type === 'offer') {
     call.offer = message.data;
@@ -256,8 +256,8 @@ function receiveKindredCallSignal(message) {
     setCallStatus('Call accepted. Connecting…');
   } else if (message.type === 'end') {
     const reason = message.data?.reason;
-    if (reason === 'no-answer' && call.incoming) showKindredNotification('Missed call', `${call.personName} tried to call you.`, `missed-${call.callId}`);
-    endKindredCall(false);
+    if (reason === 'no-answer' && call.incoming) showAMORANotification('Missed call', `${call.personName} tried to call you.`, `missed-${call.callId}`);
+    endAMORACall(false);
     if (reason === 'no-answer') notify(`Missed call from ${call.personName}.`);
     else notify(reason === 'declined' ? 'Your call was declined.' : reason === 'busy' ? 'They’re already on another call.' : 'The call ended.');
   }
@@ -267,12 +267,12 @@ function cleanCallName(value) {
   return typeof value === 'string' && value.trim() ? value.trim().slice(0, 48) : 'Your match';
 }
 
-async function startKindredCall(person, mediaType, matchId) {
-  if (!BACKEND_ENABLED || !matchId) return notify('Calls are available from an active Kindred match.');
-  if (activeKindredCall) return notify('Finish your current call first.');
+async function startAMORACall(person, mediaType, matchId) {
+  if (!BACKEND_ENABLED || !matchId) return notify('Calls are available from an active AMORA match.');
+  if (activeAMORACall) return notify('Finish your current call first.');
   if (!window.RTCPeerConnection) return notify('This browser does not support video or voice calls.');
   const socket = apiSocket();
-  const call = activeKindredCall = {
+  const call = activeAMORACall = {
     matchId,
     socket,
     incoming: false,
@@ -291,9 +291,9 @@ async function startKindredCall(person, mediaType, matchId) {
     const started = await sendCallSignal(socket, matchId, 'start', { mediaType: call.mediaType, name: state.profile?.name || 'Your match', photoUrl: state.profile?.avatar ? avatarImage(state.profile.avatar) : state.profile?.img || '' });
     call.callId = started.callId;
     call.ringTimer = setTimeout(() => {
-      if (activeKindredCall === call && !call.answered) {
+      if (activeAMORACall === call && !call.answered) {
         notify(`No answer from ${call.personName}.`);
-        endKindredCall(true, 'no-answer');
+        endAMORACall(true, 'no-answer');
       }
     }, 45000);
     const offer = await call.peerConnection.createOffer();
@@ -302,14 +302,14 @@ async function startKindredCall(person, mediaType, matchId) {
     setCallStatus('Ringing…');
   } catch (error) {
     notify(error.message || 'Could not start the call. Check your microphone and camera permissions.');
-    await endKindredCall(true, 'ended');
+    await endAMORACall(true, 'ended');
   }
 }
 
-async function endKindredCall(notifyRemote, reason = 'ended') {
-  const call = activeKindredCall;
+async function endAMORACall(notifyRemote, reason = 'ended') {
+  const call = activeAMORACall;
   if (!call) return;
-  activeKindredCall = null;
+  activeAMORACall = null;
   clearTimeout(call.ringTimer);
   clearInterval(call.durationTimer);
   if (notifyRemote && call.socket?.connected) await sendCallSignal(call.socket, call.matchId, 'end', { reason }, call.callId).catch(() => {});
@@ -319,8 +319,8 @@ async function endKindredCall(notifyRemote, reason = 'ended') {
 }
 
 function toggleCallMute(event) {
-  if (!activeKindredCall?.localStream) return;
-  const tracks = activeKindredCall.localStream.getAudioTracks();
+  if (!activeAMORACall?.localStream) return;
+  const tracks = activeAMORACall.localStream.getAudioTracks();
   if (!tracks.length) return;
   tracks.forEach((track) => { track.enabled = !track.enabled; });
   const label = tracks[0].enabled ? 'Mute mic' : 'Unmute mic';
@@ -329,8 +329,8 @@ function toggleCallMute(event) {
 }
 
 function toggleCallCamera(event) {
-  if (!activeKindredCall?.localStream) return;
-  const tracks = activeKindredCall.localStream.getVideoTracks();
+  if (!activeAMORACall?.localStream) return;
+  const tracks = activeAMORACall.localStream.getVideoTracks();
   if (!tracks.length) return;
   tracks.forEach((track) => { track.enabled = !track.enabled; });
   const label = tracks[0].enabled ? 'Camera off' : 'Camera on';
