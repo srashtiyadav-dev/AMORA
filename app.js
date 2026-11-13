@@ -130,8 +130,16 @@ async function renderApiMessages(v,options={}){
 }
 
 function makeChatMediaElement(item){
- if(item.mediaMimeType?.startsWith('video/')){const video=document.createElement('video');video.controls=true;video.playsInline=true;video.preload='metadata';video.setAttribute('aria-label','Video attachment');video.className='chat-media';return video}
- const imageElement=document.createElement('img');imageElement.alt='Shared photo';imageElement.className='chat-media';return imageElement;
+ if(item.mediaMimeType?.startsWith('video/')){const video=document.createElement('video');video.controls=true;video.playsInline=true;video.preload='auto';video.setAttribute('aria-label','Video attachment');video.className='chat-media';video.addEventListener('loadedmetadata',()=>fitChatMediaElement(video));return video}
+ const imageElement=document.createElement('img');imageElement.alt='Shared photo';imageElement.className='chat-media';imageElement.addEventListener('load',()=>fitChatMediaElement(imageElement));return imageElement;
+}
+
+function fitChatMediaElement(element){
+ const sourceWidth=element.tagName==='VIDEO'?element.videoWidth:element.naturalWidth,sourceHeight=element.tagName==='VIDEO'?element.videoHeight:element.naturalHeight;
+ if(!sourceWidth||!sourceHeight)return;
+ const maxWidth=Math.min(380,Math.max(220,window.innerWidth*.72)),maxHeight=360,ratio=sourceWidth/sourceHeight;
+ const width=Math.round(Math.min(maxWidth,maxHeight*ratio)),height=Math.round(width/ratio);
+ element.style.width=`${width}px`;element.style.height=`${height}px`;element.style.minHeight='0';element.style.aspectRatio=`${sourceWidth} / ${sourceHeight}`;
 }
 
 function startChatMediaCountdown(item,messageNode,expiresAt){
@@ -146,7 +154,7 @@ async function loadChatMedia(item,element){
   let source=chatMediaObjectUrls.get(item.id);
   if(!source){const response=await fetch(item.mediaUrl,{headers:{Authorization:`Bearer ${apiToken()}`}});if(!response.ok)throw new Error(response.status===410?'This media has expired.':'Attachment unavailable.');const expiresAt=response.headers.get('X-Media-Expires-At');if(expiresAt){item.mediaExpiresAt=expiresAt;startChatMediaCountdown(item,element.closest('.message'),expiresAt)}source=URL.createObjectURL(await response.blob());chatMediaObjectUrls.set(item.id,source);while(chatMediaObjectUrls.size>24){const [oldId,oldUrl]=chatMediaObjectUrls.entries().next().value;URL.revokeObjectURL(oldUrl);chatMediaObjectUrls.delete(oldId)}}
   if(!element.isConnected){URL.revokeObjectURL(source);chatMediaObjectUrls.delete(item.id);return}
-  if(element._mediaVisible!==false)element.src=source;else releaseChatMedia(item,element);
+  if(element._mediaVisible!==false){element.src=source;if(element.tagName==='IMG'&&element.complete)fitChatMediaElement(element);if(element.tagName==='VIDEO'&&element.readyState>=1)fitChatMediaElement(element)}else releaseChatMedia(item,element);
  }catch(error){if(element.isConnected){const unavailable=document.createElement('span');unavailable.className='media-unavailable';unavailable.textContent=error.message==='This media has expired.'?'⏱ This media has expired':'Attachment unavailable';element.replaceWith(unavailable)}}
 }
 
