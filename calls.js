@@ -73,7 +73,7 @@ function handleKindredMessage(message) {
   if (message?.senderId !== state.profile?.id) showKindredNotification('New Kindred message', message?.body || 'You have a new message.', `message-${message?.id || Date.now()}`);
   if (state.tab === 'messages' && state.selectedChat === message?.matchId) {
     const view = document.getElementById('view');
-    if (view) renderApiMessages(view);
+    if (view) renderApiMessages(view, { preserveScroll: true });
   }
 }
 
