@@ -321,7 +321,7 @@ app.get('/api/profiles/:profileId/photo', async (req, res, next) => {
   try {
     const { rows } = await pool.query('SELECT mime_type, photo_data FROM profile_photos WHERE user_id=$1', [profileId]);
     if (!rows.length) return jsonError(res, 404, 'Photo not found.');
-    res.set({ 'Content-Type': rows[0].mime_type, 'Cache-Control': 'public, max-age=3600', 'X-Content-Type-Options': 'nosniff' });
+    res.set({ 'Content-Type': rows[0].mime_type, 'Cache-Control': 'private, no-cache, must-revalidate', 'X-Content-Type-Options': 'nosniff' });
     return res.send(rows[0].photo_data);
   } catch (error) { return next(error); }
 });

@@ -300,7 +300,8 @@ function initializeProfilePhotoUpload() {
       const response = await fetch('/api/profile/photo', { method: 'PUT', headers: { Authorization: `Bearer ${apiToken()}`, 'Content-Type': 'image/jpeg' }, body: blob });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error || 'Could not upload that photo.');
-      state.profile = { ...(state.profile || {}), img: result.photoUrl, photoUrl: result.photoUrl };
+      const freshPhotoUrl = `${result.photoUrl}?v=${Date.now()}`;
+      state.profile = { ...(state.profile || {}), img: freshPhotoUrl, photoUrl: freshPhotoUrl };
       save();
       renderProfile(document.getElementById('view'));
       notify('Your profile photo was updated.');
