@@ -39,11 +39,12 @@ All protected endpoints require `Authorization: Bearer <token>`. Phone numbers u
 
 Socket.IO clients authenticate with `{ auth: { token } }`, then emit `match:join` with a match ID. `match:message` persists and broadcasts a message. `call:signal` relays only `start`, `offer`, `answer`, `ice`, `ready`, and `end` events inside a verified match room.
 
+Browser voice/video calls now use WebRTC media with Socket.IO signaling. The app includes a public STUN server by default. For networks that cannot connect directly, configure `RTC_ICE_SERVERS` as a JSON array of TURN server objects in the Render service environment; use provider-issued short-lived credentials where available because ICE settings are sent to browsers. Profile pictures can be uploaded from the profile page; the client center-crops and compresses them to JPEG and the server stores up to 800 KB per profile in PostgreSQL.
+
 ## Current limits
 
 - This backend enforces the dating app's 18+ minimum from date of birth, but a self-entered birth date is not government-ID age verification.
 - The earlier selfie screen is a local demo, not identity/face verification. A verification vendor and server-side integration are still required before showing a verified badge.
-- A real call needs client-side WebRTC capture and peer negotiation; this backend provides authorized signaling only. TURN service configuration may be needed for some networks.
-- Profile photo upload/storage is not implemented yet; `photoUrl` accepts only the current approved Unsplash image host.
-- The voice/video buttons still show the earlier demo modal. The backend provides authorized WebRTC signaling, but the browser-side media capture and peer negotiation still need to be implemented. For networks that block direct peer connections, configure a TURN service in the client.
+- Voice/video calls use browser WebRTC and require microphone/camera permission. Direct STUN connections work on many networks; a TURN relay is still needed for some restrictive networks.
+- Uploaded profile pictures use PostgreSQL storage, so keep image sizes small and monitor the database storage limit.
 - The demo selfie step is not wired to an identity provider and must not be used as a verified badge.

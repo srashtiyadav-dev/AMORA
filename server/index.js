@@ -62,7 +62,7 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       imgSrc: ["'self'", 'data:', 'https://images.unsplash.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
-      connectSrc: ["'self'", 'ws:', 'wss:'],
+      connectSrc: ["'self'", 'ws:', 'wss:', 'stun:', 'turn:', 'turns:'],
       mediaSrc: ["'self'", 'blob:'],
       frameAncestors: ["'none'"],
     },
@@ -179,7 +179,10 @@ async function loadProfile(userId) {
     SELECT user_id AS id, display_name AS "displayName", birth_date AS "birthDate",
       date_part('year', age(birth_date))::int AS age,
       gender, interested_in AS "interestedIn", relationship_goal AS "relationshipGoal",
-      city, bio, interests, photo_url AS "photoUrl", chemistry_answers AS "chemistryAnswers",
+      city, bio, interests,
+      CASE WHEN EXISTS (SELECT 1 FROM profile_photos pp WHERE pp.user_id=profiles.user_id)
+        THEN '/api/profiles/' || profiles.user_id::text || '/photo' ELSE photo_url END AS "photoUrl",
+      chemistry_answers AS "chemistryAnswers",
       personality_twin AS "personalityTwin", updated_at AS "updatedAt"
     FROM profiles WHERE user_id = $1`, [userId]);
   return rows[0] || null;
@@ -293,6 +296,36 @@ app.put('/api/profile', requireAuth, writeLimiter, async (req, res, next) => {
   } catch (error) { return next(error); }
 });
 
+app.put('/api/profile/photo', requireAuth, writeLimiter,
+  express.raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: '800kb' }),
+  async (req, res, next) => {
+    const mimeType = req.get('content-type')?.split(';')[0].trim().toLowerCase();
+    const photo = req.body;
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType) || !Buffer.isBuffer(photo) || photo.length < 1) {
+      return jsonError(res, 400, 'Choose a JPEG, PNG, or WebP profile picture.');
+    }
+    try {
+      const { rowCount } = await pool.query('SELECT 1 FROM profiles WHERE user_id=$1', [req.userId]);
+      if (!rowCount) return jsonError(res, 409, 'Create your profile before uploading a photo.');
+      await pool.query(`
+        INSERT INTO profile_photos (user_id,mime_type,photo_data) VALUES ($1,$2,$3)
+        ON CONFLICT (user_id) DO UPDATE SET mime_type=EXCLUDED.mime_type,
+          photo_data=EXCLUDED.photo_data, updated_at=now()`, [req.userId, mimeType, photo]);
+      return res.json({ photoUrl: `/api/profiles/${req.userId}/photo` });
+    } catch (error) { return next(error); }
+  });
+
+app.get('/api/profiles/:profileId/photo', async (req, res, next) => {
+  const profileId = req.params.profileId.toLowerCase();
+  if (!UUID.test(profileId)) return jsonError(res, 404, 'Photo not found.');
+  try {
+    const { rows } = await pool.query('SELECT mime_type, photo_data FROM profile_photos WHERE user_id=$1', [profileId]);
+    if (!rows.length) return jsonError(res, 404, 'Photo not found.');
+    res.set({ 'Content-Type': rows[0].mime_type, 'Cache-Control': 'public, max-age=3600', 'X-Content-Type-Options': 'nosniff' });
+    return res.send(rows[0].photo_data);
+  } catch (error) { return next(error); }
+});
+
 app.get('/api/profiles', requireAuth, async (req, res, next) => {
   const search = cleanText(req.query.search, 100);
   const limit = Math.min(Math.max(Number(req.query.limit) || 24, 1), 50);
@@ -303,7 +336,10 @@ app.get('/api/profiles', requireAuth, async (req, res, next) => {
       SELECT p.user_id AS id, p.display_name AS "displayName",
         date_part('year', age(p.birth_date))::int AS age,
         p.gender, p.relationship_goal AS "relationshipGoal", p.city, p.bio,
-        p.interests, p.photo_url AS "photoUrl", p.chemistry_answers AS "chemistryAnswers"
+        p.interests,
+        CASE WHEN EXISTS (SELECT 1 FROM profile_photos pp WHERE pp.user_id=p.user_id)
+          THEN '/api/profiles/' || p.user_id::text || '/photo' ELSE p.photo_url END AS "photoUrl",
+        p.chemistry_answers AS "chemistryAnswers"
       FROM profiles p
       WHERE p.user_id <> $1
         AND (cardinality($2::text[]) = 0 OR 'Everyone' = ANY($2::text[]) OR
@@ -374,7 +410,10 @@ app.get('/api/matches', requireAuth, async (req, res, next) => {
     const { rows } = await pool.query(`
       SELECT m.id, m.created_at AS "createdAt", p.user_id AS "profileId",
         p.display_name AS "displayName", date_part('year', age(p.birth_date))::int AS age,
-        p.city, p.photo_url AS "photoUrl", p.relationship_goal AS "relationshipGoal",
+        p.city,
+        CASE WHEN EXISTS (SELECT 1 FROM profile_photos pp WHERE pp.user_id=p.user_id)
+          THEN '/api/profiles/' || p.user_id::text || '/photo' ELSE p.photo_url END AS "photoUrl",
+        p.relationship_goal AS "relationshipGoal",
         (SELECT json_build_object('body', msg.body, 'createdAt', msg.created_at, 'senderId', msg.sender_id)
          FROM messages msg WHERE msg.match_id=m.id ORDER BY msg.created_at DESC LIMIT 1) AS "lastMessage"
       FROM matches m
@@ -440,9 +479,17 @@ app.post('/api/profiles/:profileId/report', requireAuth, writeLimiter, async (re
   } catch (error) { return next(error); }
 });
 
-app.get('/config.js', (_req, res) => res.type('application/javascript').send('window.KINDRED_CONFIG={backend:true};'));
+app.get('/config.js', (_req, res) => {
+  let iceServers = [];
+  try {
+    const configured = JSON.parse(process.env.RTC_ICE_SERVERS || '[]');
+    if (Array.isArray(configured)) iceServers = configured;
+  } catch { console.error('RTC_ICE_SERVERS must be valid JSON; using the built-in STUN server.'); }
+  return res.type('application/javascript').send(`window.KINDRED_CONFIG=${JSON.stringify({ backend: true, iceServers })};`);
+});
 app.get('/', (_req, res) => res.sendFile(path.join(ROOT, 'index.html')));
 app.get('/app.js', (_req, res) => res.sendFile(path.join(ROOT, 'app.js')));
+app.get('/calls.js', (_req, res) => res.sendFile(path.join(ROOT, 'calls.js')));
 app.get('/styles.css', (_req, res) => res.sendFile(path.join(ROOT, 'styles.css')));
 app.use('/api', (_req, res) => jsonError(res, 404, 'API route not found.'));
 app.use((error, _req, res, _next) => {

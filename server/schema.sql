@@ -28,6 +28,13 @@ CREATE TABLE IF NOT EXISTS profiles (
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS chemistry_answers jsonb NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS personality_twin text NOT NULL DEFAULT '';
 
+CREATE TABLE IF NOT EXISTS profile_photos (
+  user_id uuid PRIMARY KEY REFERENCES profiles(user_id) ON DELETE CASCADE,
+  mime_type text NOT NULL CHECK (mime_type IN ('image/jpeg','image/png','image/webp')),
+  photo_data bytea NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS likes (
   from_user uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   to_user uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
