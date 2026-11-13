@@ -278,6 +278,16 @@ app.put('/api/profile/avatar', requireAuth, writeLimiter, async (req, res, next)
   } catch (error) { return next(error); }
 });
 
+app.put('/api/profile/location', requireAuth, writeLimiter, async (req, res, next) => {
+  if (typeof req.body?.city !== 'string' || req.body.city.length > 100) return jsonError(res, 400, 'Enter a city or neighborhood under 100 characters.');
+  const city = req.body.city.trim();
+  try {
+    const { rowCount } = await pool.query('UPDATE profiles SET city=$2, updated_at=now() WHERE user_id=$1', [req.userId, city]);
+    if (!rowCount) return jsonError(res, 409, 'Create your profile before adding a location.');
+    return res.json({ profile: await loadProfile(req.userId) });
+  } catch (error) { return next(error); }
+});
+
 app.put('/api/profile', requireAuth, writeLimiter, async (req, res, next) => {
   const body = req.body || {};
   const displayName = cleanText(body.displayName, 40);
