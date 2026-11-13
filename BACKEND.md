@@ -34,7 +34,7 @@ All protected endpoints require `Authorization: Bearer <token>`. Phone numbers u
 | `GET` | `/api/matches` | List matches and recent messages |
 | `GET` | `/api/matches/:matchId/messages` | Load a match's messages |
 | `POST` | `/api/matches/:matchId/messages` | Persist/send a message |
-| `POST` | `/api/matches/:matchId/media` | Send a JPEG, PNG, WebP, MP4, or WebM attachment (up to 20 MB) |
+| `POST` | `/api/matches/:matchId/media` | Send JPEG/PNG/WebP/MP4/WebM (up to 20 MB); optional `viewSeconds=5|10|30|60` starts when the recipient opens it |
 | `GET` | `/api/matches/:matchId/media/:mediaId` | Fetch a chat attachment; match membership is required |
 | `POST` | `/api/profiles/:profileId/block` | Block a profile |
 | `POST` | `/api/profiles/:profileId/report` | Report a profile |
@@ -49,5 +49,5 @@ Browser voice/video calls now use WebRTC media with Socket.IO signaling. The app
 - The earlier selfie screen is a local demo, not identity/face verification. A verification vendor and server-side integration are still required before showing a verified badge.
 - Voice/video calls use browser WebRTC and require microphone/camera permission. Direct STUN connections work on many networks; a TURN relay is still needed for some restrictive networks.
 - Uploaded profile pictures use PostgreSQL storage, so keep image sizes small and monitor the database storage limit.
-- Chat photo and video attachments are stored in PostgreSQL and limited to 20 MB each; monitor database storage as people share media.
+- Chat photo and video attachments are stored in PostgreSQL and limited to 20 MB each; optional 5/10/30/60-second view timers begin when the other match member opens the media. Expired media is removed; monitor database storage as people share media.
 - The demo selfie step is not wired to an identity provider and must not be used as a verified badge.

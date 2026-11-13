@@ -41,6 +41,7 @@ if (!DATABASE_URL) throw new Error('DATABASE_URL is required.');
 const pool = new Pool({ connectionString: DATABASE_URL, max: 10, idleTimeoutMillis: 30_000 });
 const app = express();
 const server = http.createServer(app);
+let mediaCleanupTimer = null;
 const allowedOrigins = new Set((process.env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean));
 const io = new Server(server, {
   cors: {
@@ -455,7 +456,10 @@ app.get('/api/matches/:matchId/messages', requireAuth, async (req, res, next) =>
   try {
     const { rows } = await pool.query(`SELECT msg.id, msg.match_id AS "matchId", msg.sender_id AS "senderId",
       msg.body, msg.created_at AS "createdAt", media.mime_type AS "mediaMimeType",
-      CASE WHEN media.id IS NULL THEN NULL ELSE '/api/matches/' || msg.match_id::text || '/media/' || media.id::text END AS "mediaUrl"
+      media.view_duration_seconds AS "mediaViewSeconds", media.expires_at AS "mediaExpiresAt",
+      (msg.body='Media expired' OR (media.expires_at IS NOT NULL AND media.expires_at<=now())) AS "mediaExpired",
+      CASE WHEN media.id IS NULL OR (media.expires_at IS NOT NULL AND media.expires_at<=now()) THEN NULL
+        ELSE '/api/matches/' || msg.match_id::text || '/media/' || media.id::text END AS "mediaUrl"
       FROM messages msg LEFT JOIN match_media media ON media.id=msg.media_id
       WHERE msg.match_id=$1 AND ($2::timestamptz IS NULL OR msg.created_at<$2)
       ORDER BY msg.created_at DESC LIMIT 50`, [req.params.matchId, before]);
@@ -467,6 +471,8 @@ app.post('/api/matches/:matchId/media', requireAuth, mediaLimiter,
   express.raw({ type: ['image/jpeg','image/png','image/webp','video/mp4','video/webm'], limit: '20mb' }),
   async (req, res, next) => {
     const matchId = req.params.matchId;
+    const requestedViewSeconds = req.query.viewSeconds === undefined ? 0 : Number(req.query.viewSeconds);
+    if (![0,5,10,30,60].includes(requestedViewSeconds)) return jsonError(res, 400, 'Choose a media timer of 5, 10, 30, 60 seconds, or keep it in chat.');
     const mimeType = req.get('content-type')?.split(';')[0].trim().toLowerCase();
     const mediaData = req.body;
     if (!['image/jpeg','image/png','image/webp','video/mp4','video/webm'].includes(mimeType) || !Buffer.isBuffer(mediaData) || !mediaData.length) {
@@ -477,8 +483,8 @@ app.post('/api/matches/:matchId/media', requireAuth, mediaLimiter,
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const stored = await client.query(`INSERT INTO match_media (match_id,sender_id,mime_type,media_data)
-        VALUES ($1,$2,$3,$4) RETURNING id`, [matchId, req.userId, mimeType, mediaData]);
+      const stored = await client.query(`INSERT INTO match_media (match_id,sender_id,mime_type,view_duration_seconds,media_data)
+        VALUES ($1,$2,$3,$4,$5) RETURNING id`, [matchId, req.userId, mimeType, requestedViewSeconds || null, mediaData]);
       const mediaId = stored.rows[0].id;
       const body = mimeType.startsWith('video/') ? 'Shared a video' : 'Shared a photo';
       const { rows } = await client.query(`INSERT INTO messages (match_id,sender_id,body,media_id)
@@ -498,12 +504,29 @@ app.get('/api/matches/:matchId/media/:mediaId', requireAuth, async (req, res, ne
   const { matchId, mediaId } = req.params;
   if (!UUID.test(mediaId) || !await matchMembership(matchId, req.userId)) return jsonError(res, 404, 'Media not found.');
   try {
-    const { rows } = await pool.query('SELECT mime_type,media_data FROM match_media WHERE id=$1 AND match_id=$2', [mediaId, matchId]);
+    const opened = await pool.query(`UPDATE match_media SET opened_at=now(),
+        expires_at=now() + view_duration_seconds * interval '1 second'
+      WHERE id=$1 AND match_id=$2 AND sender_id<>$3 AND view_duration_seconds IS NOT NULL AND expires_at IS NULL
+      RETURNING expires_at`, [mediaId, matchId, req.userId]);
+    if (opened.rows[0]) io.to(`match:${matchId}`).emit('media:timer', { matchId, mediaId, openedBy: req.userId, expiresAt: opened.rows[0].expires_at });
+    const { rows } = await pool.query('SELECT mime_type,media_data,expires_at FROM match_media WHERE id=$1 AND match_id=$2', [mediaId, matchId]);
     if (!rows.length) return jsonError(res, 404, 'Media not found.');
+    if (rows[0].expires_at && new Date(rows[0].expires_at).getTime() <= Date.now()) {
+      await pool.query("UPDATE messages SET body='Media expired',media_id=NULL WHERE media_id=$1", [mediaId]);
+      await pool.query('DELETE FROM match_media WHERE id=$1', [mediaId]);
+      return jsonError(res, 410, 'This media has expired.');
+    }
     res.set({ 'Content-Type': rows[0].mime_type, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
+    if (rows[0].expires_at) res.set('X-Media-Expires-At', new Date(rows[0].expires_at).toISOString());
     return res.send(rows[0].media_data);
   } catch (error) { return next(error); }
 });
+
+async function cleanExpiredChatMedia() {
+  await pool.query(`UPDATE messages SET body='Media expired',media_id=NULL
+    WHERE media_id IN (SELECT id FROM match_media WHERE expires_at IS NOT NULL AND expires_at<=now())`);
+  await pool.query('DELETE FROM match_media WHERE expires_at IS NOT NULL AND expires_at<=now()');
+}
 
 app.get('/api/matches/:matchId/calls', requireAuth, async (req, res, next) => {
   if (!await matchMembership(req.params.matchId, req.userId)) return jsonError(res, 404, 'Conversation not found.');
@@ -665,6 +688,9 @@ io.on('connection', (socket) => {
 async function start() {
   await runSchema();
   await pool.query('SELECT 1');
+  await cleanExpiredChatMedia();
+  mediaCleanupTimer = setInterval(() => cleanExpiredChatMedia().catch((error) => console.error('Timed media cleanup failed:', error.message)), 10_000);
+  mediaCleanupTimer.unref();
   server.listen(PORT, '0.0.0.0', () => console.log(`Kindred listening on ${PORT}`));
 }
 
@@ -674,6 +700,7 @@ start().catch((error) => {
 });
 
 async function shutdown() {
+  if (mediaCleanupTimer) clearInterval(mediaCleanupTimer);
   io.close();
   await pool.end();
   process.exit(0);

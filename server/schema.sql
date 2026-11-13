@@ -67,9 +67,15 @@ CREATE TABLE IF NOT EXISTS match_media (
   match_id uuid NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
   sender_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   mime_type text NOT NULL CHECK (mime_type IN ('image/jpeg','image/png','image/webp','video/mp4','video/webm')),
+  view_duration_seconds integer CHECK (view_duration_seconds IN (5,10,30,60)),
+  opened_at timestamptz,
+  expires_at timestamptz,
   media_data bytea NOT NULL CHECK (octet_length(media_data) <= 20971520),
   created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE match_media ADD COLUMN IF NOT EXISTS view_duration_seconds integer CHECK (view_duration_seconds IN (5,10,30,60));
+ALTER TABLE match_media ADD COLUMN IF NOT EXISTS opened_at timestamptz;
+ALTER TABLE match_media ADD COLUMN IF NOT EXISTS expires_at timestamptz;
 CREATE INDEX IF NOT EXISTS match_media_match_created_idx ON match_media (match_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS messages (

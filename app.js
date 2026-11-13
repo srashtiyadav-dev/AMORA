@@ -32,6 +32,7 @@ const BACKEND_ENABLED = window.KINDRED_CONFIG?.backend === true;
 const apiToken = () => sessionStorage.getItem('kindred-token') || '';
 let realtimeSocket = null;
 const chatMediaObjectUrls = new Map();
+const chatMediaTimers = new Map();
 let chatMediaObserver = null;
 async function apiRequest(path,options={}){const headers={'Content-Type':'application/json',...(options.headers||{})};if(apiToken())headers.Authorization=`Bearer ${apiToken()}`;const response=await fetch(`/api${path}`,{...options,headers,body:options.body===undefined?undefined:JSON.stringify(options.body)});const data=response.status===204?{}:await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||`Request failed (${response.status}).`);return data}
 function fromApiProfile(p){if(!p)return null;return{id:p.id,name:p.displayName,age:p.age,birthDate:p.birthDate||'',gender:p.gender,looking:Array.isArray(p.interestedIn)?p.interestedIn[0]||'Everyone':p.looking||'Everyone',relation:p.relationshipGoal||p.relation,city:p.city||'',bio:p.bio||'',tags:p.interests||p.tags||[],img:p.photoUrl||p.img||'',avatar:p.avatar||'',interestedIn:p.interestedIn||[],chemistryAnswers:p.chemistryAnswers||{},personalityTwin:p.personalityTwin||''}}
@@ -83,6 +84,7 @@ boot();
 
 async function renderApiMessages(v,options={}){
  chatMediaObserver?.disconnect();chatMediaObserver=null;for(const source of chatMediaObjectUrls.values())URL.revokeObjectURL(source);chatMediaObjectUrls.clear();
+ for(const timer of chatMediaTimers.values())clearInterval(timer);chatMediaTimers.clear();
  const oldMessages=v.querySelector('#messages');const oldTop=oldMessages?.scrollTop||0;const oldHeight=oldMessages?.scrollHeight||0;
  v.innerHTML='<div class="empty-state"><p>Loading conversations…</p></div>';
  try{
@@ -97,7 +99,17 @@ async function renderApiMessages(v,options={}){
   v.innerHTML=`<div class="section-title"><div><div class="eyebrow">Good conversations happen here</div><h1>Messages.</h1><p>Say something kind. See where it goes.</p></div></div><div class="chat-layout"><aside class="chat-list"><h3>Matches</h3>${matches.map(m=>`<button class="chat-person ${m.id===selected.id?'active':''}" data-chat-id="${m.id}"><img src="${remoteImage(m,120)}" alt=""><div><strong>${escapeHtml(m.displayName)}</strong><small>${escapeHtml(m.lastMessage?.body||'Start a conversation')}</small></div></button>`).join('')}</aside><section class="chat-window"><header class="chat-head"><div class="chat-head-person"><img src="${remoteImage(selected,120)}" alt=""><div><strong>${escapeHtml(selected.displayName)}</strong><small id="typing-status">● &nbsp;Matched on Kindred</small></div></div><div class="call-actions"><button class="icon-btn" id="voice-call" aria-label="Start voice call" title="Start a voice call">☎</button><button class="icon-btn" id="video-call" aria-label="Start video call" title="Start a video call">▣</button></div></header><div class="messages" id="messages">${events.map(item=>{const time=new Date(item.at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});if(item.eventType==='message')return `<div class="message ${item.senderId===state.profile?.id?'mine':''}">${escapeHtml(item.body)}<time>${time}</time></div>`;const missed=item.status==='missed',outgoing=item.callerId===state.profile?.id,label=missed?'Missed call':item.status==='declined'?'Declined call':item.status==='cancelled'?'Call cancelled':item.status==='completed'?`${item.mediaType==='video'?'Video':'Voice'} call`:outgoing?'Outgoing call':'Incoming call';const duration=item.durationSeconds?` · ${Math.floor(item.durationSeconds/60)}:${String(item.durationSeconds%60).padStart(2,'0')}`:'';return `<div class="call-history ${outgoing?'outgoing':'incoming'} ${missed?'missed':''}"><span class="call-history-icon">${item.mediaType==='video'?'▣':'☎'}</span><span><strong>${label}</strong><small>${item.mediaType==='video'?'Video':'Voice'}${duration}</small></span><time>${time}</time></div>`}).join('')}</div><form class="chat-compose" id="compose"><input id="message-input" placeholder="Write a kind hello…" autocomplete="off" aria-label="Message"><button type="submit">Send</button></form></section></div>`;
   const messageItems=events.filter(item=>item.eventType==='message'),messageNodes=v.querySelectorAll('.message');
   chatMediaObserver='IntersectionObserver' in window?new IntersectionObserver(entries=>entries.forEach(entry=>{const item=entry.target._chatMediaItem;if(!item)return;entry.target._mediaVisible=entry.isIntersecting;if(entry.isIntersecting)loadChatMedia(item,entry.target);else releaseChatMedia(item,entry.target)}),{root:v.querySelector('#messages'),rootMargin:'180px 0px'}):null;
-  messageItems.forEach((item,index)=>{if(!item.mediaUrl)return;const node=messageNodes[index];if(!node)return;const time=node.querySelector('time');node.textContent='';node.classList.add('media-message');let media;if(item.mediaMimeType?.startsWith('video/')){media=document.createElement('video');media.controls=true;media.playsInline=true;media.preload='metadata';media.setAttribute('aria-label','Video attachment')}else{media=document.createElement('img');media.alt='Shared photo'}media.className='chat-media';media._chatMediaItem=item;node.append(media);if(time)node.append(time);if(chatMediaObserver)chatMediaObserver.observe(media);else{media._mediaVisible=true;loadChatMedia(item,media)}});
+  messageItems.forEach((item,index)=>{
+   const node=messageNodes[index];if(!node)return;const time=node.querySelector('time');
+   if(item.mediaExpired||item.body==='Media expired'){node.textContent='';node.classList.add('media-message','media-expired-message');const expired=document.createElement('span');expired.className='media-expired';expired.textContent='⏱ This media has expired';node.append(expired);if(time)node.append(time);return}
+   if(!item.mediaUrl)return;
+   node.textContent='';node.classList.add('media-message');const media=makeChatMediaElement(item);media._chatMediaItem=item;media.dataset.mediaId=item.id;
+   if(time)node.append(time);
+   const showMedia=()=>{media._mediaVisible=true;loadChatMedia(item,media)};
+   const timedIncoming=item.mediaViewSeconds>0&&!item.mediaExpiresAt&&item.senderId!==state.profile?.id;
+   if(timedIncoming){const prompt=document.createElement('button');prompt.type='button';prompt.className='timed-media-open';prompt.dataset.mediaId=item.id;prompt.textContent=`🔒 View ${item.mediaMimeType?.startsWith('video/')?'video':'photo'} · ${item.mediaViewSeconds}s`;prompt.onclick=()=>{prompt.classList.add('opening');prompt.textContent='Opening…';prompt.replaceWith(media);showMedia()};node.insertBefore(prompt,time||null)}else{node.insertBefore(media,time||null);if(item.mediaExpiresAt)startChatMediaCountdown(item,node,item.mediaExpiresAt);if(chatMediaObserver)chatMediaObserver.observe(media);else showMedia()}
+   if(item.mediaViewSeconds>0&&!item.mediaExpiresAt&&item.senderId===state.profile?.id){const note=document.createElement('span');note.className='media-display-timer';note.textContent=`⏱ ${item.mediaViewSeconds}s after opening`;node.insertBefore(note,time||null)}
+  });
   v.querySelectorAll('.message').forEach(message=>{if(message.textContent.includes('🎲 Truth or Dare'))message.classList.add('game-message')});
   const gameLauncher=document.createElement('button');gameLauncher.type='button';gameLauncher.className='truth-dare-launcher';gameLauncher.innerHTML='<span>🎲</span><span><strong>Truth or Dare</strong><small>A low-pressure way to break the ice</small></span><span class="launcher-arrow">→</span>';document.querySelector('.chat-compose').before(gameLauncher);gameLauncher.onclick=()=>openTruthDareGame(selected.displayName,async prompt=>{await apiRequest(`/matches/${selected.id}/messages`,{method:'POST',body:{body:prompt}});renderApiMessages(v)});
   addChatMediaPicker(document.querySelector('.chat-compose'),selected.id,v);
@@ -106,7 +118,7 @@ async function renderApiMessages(v,options={}){
   messagePane.addEventListener('scroll',updateScrollButton,{passive:true});scrollLatest.onclick=()=>messagePane.scrollTo({top:messagePane.scrollHeight,behavior:'smooth'});
   if(options.preserveScroll&&oldMessages)messagePane.scrollTop=Math.max(0,oldTop+(messagePane.scrollHeight-oldHeight));else messagePane.scrollTop=messagePane.scrollHeight;updateScrollButton();
   const socket=apiSocket();let typingTimer;
-  if(socket){socket.emit('match:join',selected.id);socket.off('typing');socket.off('call:log:update');socket.on('typing',event=>{if(event.matchId!==selected.id||event.userId===state.profile?.id)return;const status=document.getElementById('typing-status');if(status)status.innerHTML=event.typing?'✍ &nbsp;Typing…':'● &nbsp;Matched on Kindred'});socket.on('call:log:update',event=>{if(event.matchId===selected.id&&state.tab==='messages'&&state.selectedChat===selected.id)renderApiMessages(v,{preserveScroll:true})})}
+  if(socket){socket.emit('match:join',selected.id);socket.off('typing');socket.off('call:log:update');socket.off('media:timer');socket.on('typing',event=>{if(event.matchId!==selected.id||event.userId===state.profile?.id)return;const status=document.getElementById('typing-status');if(status)status.innerHTML=event.typing?'✍ &nbsp;Typing…':'● &nbsp;Matched on Kindred'});socket.on('call:log:update',event=>{if(event.matchId===selected.id&&state.tab==='messages'&&state.selectedChat===selected.id)renderApiMessages(v,{preserveScroll:true})});socket.on('media:timer',event=>{if(event.matchId!==selected.id||state.tab!=='messages'||state.selectedChat!==selected.id)return;const locallyOpening=event.openedBy===state.profile?.id&&v.querySelector(`.chat-media[data-media-id="${event.mediaId}"]`);if(!locallyOpening)renderApiMessages(v,{preserveScroll:true})})}
   v.querySelectorAll('[data-chat-id]').forEach(button=>button.onclick=()=>{state.selectedChat=button.dataset.chatId;renderApiMessages(v)});
   const input=document.getElementById('message-input');
   input.oninput=()=>{if(!socket)return;socket.emit(input.value.trim()?'typing:start':'typing:stop',{matchId:selected.id});clearTimeout(typingTimer);if(input.value.trim())typingTimer=setTimeout(()=>socket.emit('typing:stop',{matchId:selected.id}),1400)};
@@ -116,13 +128,25 @@ async function renderApiMessages(v,options={}){
  }catch(error){if(v.isConnected)v.innerHTML=`<div class="empty-state"><h2>Couldn’t load messages.</h2><p>${escapeHtml(error.message)}</p></div>`}
 }
 
+function makeChatMediaElement(item){
+ if(item.mediaMimeType?.startsWith('video/')){const video=document.createElement('video');video.controls=true;video.playsInline=true;video.preload='metadata';video.setAttribute('aria-label','Video attachment');video.className='chat-media';return video}
+ const imageElement=document.createElement('img');imageElement.alt='Shared photo';imageElement.className='chat-media';return imageElement;
+}
+
+function startChatMediaCountdown(item,messageNode,expiresAt){
+ const expiry=new Date(expiresAt).getTime();if(!Number.isFinite(expiry)||!messageNode)return;
+ const badge=messageNode.querySelector('.media-display-timer')||document.createElement('span');badge.className='media-display-timer';if(!badge.isConnected)messageNode.append(badge);
+ const update=()=>{const seconds=Math.max(0,Math.ceil((expiry-Date.now())/1000));if(seconds<=0){clearInterval(chatMediaTimers.get(item.id));chatMediaTimers.delete(item.id);const media=messageNode.querySelector('.chat-media');if(media)releaseChatMedia(item,media);media?.remove();messageNode.classList.add('media-expired-message');badge.textContent='⏱ This media has expired';return}badge.textContent=`⏱ ${seconds}s left`};
+ clearInterval(chatMediaTimers.get(item.id));update();if(expiry>Date.now())chatMediaTimers.set(item.id,setInterval(update,1000));
+}
+
 async function loadChatMedia(item,element){
  try{
   let source=chatMediaObjectUrls.get(item.id);
-  if(!source){const response=await fetch(item.mediaUrl,{headers:{Authorization:`Bearer ${apiToken()}`}});if(!response.ok)throw new Error('Attachment unavailable.');source=URL.createObjectURL(await response.blob());chatMediaObjectUrls.set(item.id,source);while(chatMediaObjectUrls.size>24){const [oldId,oldUrl]=chatMediaObjectUrls.entries().next().value;URL.revokeObjectURL(oldUrl);chatMediaObjectUrls.delete(oldId)}}
+  if(!source){const response=await fetch(item.mediaUrl,{headers:{Authorization:`Bearer ${apiToken()}`}});if(!response.ok)throw new Error(response.status===410?'This media has expired.':'Attachment unavailable.');const expiresAt=response.headers.get('X-Media-Expires-At');if(expiresAt){item.mediaExpiresAt=expiresAt;startChatMediaCountdown(item,element.closest('.message'),expiresAt)}source=URL.createObjectURL(await response.blob());chatMediaObjectUrls.set(item.id,source);while(chatMediaObjectUrls.size>24){const [oldId,oldUrl]=chatMediaObjectUrls.entries().next().value;URL.revokeObjectURL(oldUrl);chatMediaObjectUrls.delete(oldId)}}
   if(!element.isConnected){URL.revokeObjectURL(source);chatMediaObjectUrls.delete(item.id);return}
   if(element._mediaVisible!==false)element.src=source;else releaseChatMedia(item,element);
- }catch{if(element.isConnected){const unavailable=document.createElement('span');unavailable.className='media-unavailable';unavailable.textContent='Attachment unavailable';element.replaceWith(unavailable)}}
+ }catch(error){if(element.isConnected){const unavailable=document.createElement('span');unavailable.className='media-unavailable';unavailable.textContent=error.message==='This media has expired.'?'⏱ This media has expired':'Attachment unavailable';element.replaceWith(unavailable)}}
 }
 
 function releaseChatMedia(item,element){
@@ -139,8 +163,9 @@ async function prepareChatImage(file){
 function addChatMediaPicker(form,matchId,view){
  const button=document.createElement('button');button.type='button';button.className='chat-attach-btn';button.textContent='＋';button.setAttribute('aria-label','Attach a photo or video');button.title='Attach a photo or video';
  const picker=document.createElement('input');picker.type='file';picker.accept='image/jpeg,image/png,image/webp,video/mp4,video/webm';picker.hidden=true;picker.setAttribute('aria-label','Choose a photo or video');
- form.insertBefore(button,form.querySelector('#message-input'));form.append(picker);
- button.onclick=()=>picker.click();
+ const menu=document.createElement('div');menu.className='media-send-menu';menu.hidden=true;menu.innerHTML='<label for="media-view-timer">Display timer</label><select id="media-view-timer"><option value="0">Keep in chat</option><option value="5">5 seconds after opening</option><option value="10">10 seconds after opening</option><option value="30">30 seconds after opening</option><option value="60">1 minute after opening</option></select><p>Timed media starts when your match opens it.</p><button type="button" class="media-choose-button">Choose photo or video</button>';
+ form.insertBefore(button,form.querySelector('#message-input'));form.append(picker);form.closest('.chat-window').append(menu);
+ const timerSelect=menu.querySelector('#media-view-timer');button.onclick=()=>{menu.hidden=!menu.hidden};menu.querySelector('.media-choose-button').onclick=()=>{menu.hidden=true;picker.click()};
  picker.onchange=async()=>{
   const file=picker.files?.[0];picker.value='';if(!file)return;
   if(!['image/jpeg','image/png','image/webp','video/mp4','video/webm'].includes(file.type))return notify('Choose a JPEG, PNG, WebP, MP4, or WebM file.');
@@ -149,7 +174,7 @@ function addChatMediaPicker(form,matchId,view){
   try{
    let payload=file,mimeType=file.type;
    if(file.type.startsWith('image/')){payload=await prepareChatImage(file);if(!payload)throw new Error('Could not prepare that image.');mimeType='image/jpeg';if(payload.size>20*1024*1024)throw new Error('Choose a smaller image.')}
-   const response=await fetch(`/api/matches/${matchId}/media`,{method:'POST',headers:{Authorization:`Bearer ${apiToken()}`,'Content-Type':mimeType},body:payload});
+   const response=await fetch(`/api/matches/${matchId}/media?viewSeconds=${encodeURIComponent(timerSelect.value)}`,{method:'POST',headers:{Authorization:`Bearer ${apiToken()}`,'Content-Type':mimeType},body:payload});
    const result=await response.json().catch(()=>({}));if(!response.ok)throw new Error(result.error||'Could not send that media.');
    renderApiMessages(view);
   }catch(error){notify(error.message||'Could not send that media.')}finally{button.disabled=false;button.classList.remove('uploading')}
