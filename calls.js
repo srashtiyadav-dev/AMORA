@@ -81,6 +81,17 @@ function setCallStatus(message) {
   if (activeKindredCall?.statusElement?.isConnected) activeKindredCall.statusElement.textContent = message;
 }
 
+function startCallDuration(call) {
+  if (call.durationTimer || activeKindredCall !== call) return;
+  call.connectedAt = Date.now();
+  const update = () => {
+    const elapsed = Math.floor((Date.now() - call.connectedAt) / 1000);
+    setCallStatus(`Connected · ${String(Math.floor(elapsed / 60)).padStart(2, '0')}:${String(elapsed % 60).padStart(2, '0')}`);
+  };
+  update();
+  call.durationTimer = setInterval(update, 1000);
+}
+
 function showKindredNotification(title, body, tag) {
   if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
     try {
@@ -108,7 +119,7 @@ function renderCallModal(call, incoming = false) {
     <header class="call-window-head"><div><div class="eyebrow">${incoming ? 'Incoming' : 'Kindred'} ${isVideo ? 'video' : 'voice'} call</div><h2>${escapeHtml(call.personName)}</h2></div><button class="selfie-close" data-call-end aria-label="End call">×</button></header>
     <div class="call-stage ${isVideo ? 'video-stage' : 'voice-stage'}">
       <video class="call-remote-video" autoplay playsinline ${isVideo ? '' : 'hidden'}></video>
-      <div class="call-avatar" ${isVideo ? 'hidden' : ''}>${escapeHtml(call.personName.slice(0,1).toUpperCase())}</div>
+      <div class="call-avatar ${isVideo ? 'video-placeholder' : ''}">${call.personPhoto ? `<img src="${escapeHtml(call.personPhoto)}" alt="">` : `<span>${escapeHtml(call.personName.slice(0,1).toUpperCase())}</span>`}</div>
       <video class="call-local-video" autoplay playsinline muted ${isVideo ? '' : 'hidden'}></video>
     </div>
     <audio class="call-remote-audio" autoplay></audio>
@@ -143,6 +154,7 @@ function createCallPeer(call) {
     const [stream] = streams;
     if (!stream || activeKindredCall !== call) return;
     if (call.mediaType === 'video') {
+      call.modal.querySelector('.call-avatar')?.setAttribute('hidden', '');
       call.remoteVideo.srcObject = stream;
       call.remoteVideo.play().catch(() => setCallStatus('Connected. Tap the video to start playback.'));
     } else {
@@ -151,7 +163,7 @@ function createCallPeer(call) {
     }
   };
   peer.onconnectionstatechange = () => {
-    if (peer.connectionState === 'connected') setCallStatus('Connected');
+    if (peer.connectionState === 'connected') startCallDuration(call);
     if (peer.connectionState === 'failed') setCallStatus('Could not connect. A TURN relay may be needed on this network.');
     if (peer.connectionState === 'disconnected') setCallStatus('Connection interrupted…');
   };
@@ -219,6 +231,7 @@ function receiveKindredCallSignal(message) {
       accepted: false,
       mediaType: message.data?.mediaType === 'video' ? 'video' : 'voice',
       personName: cleanCallName(message.data?.name),
+      personPhoto: typeof message.data?.photoUrl === 'string' ? message.data.photoUrl.slice(0, 2048) : '',
       from: message.from,
       pendingIce: [],
     };
@@ -266,6 +279,7 @@ async function startKindredCall(person, mediaType, matchId) {
     accepted: true,
     mediaType: mediaType === 'video' ? 'video' : 'voice',
     personName: cleanCallName(person?.displayName || person?.name),
+    personPhoto: typeof (person?.photoUrl || person?.img) === 'string' ? (person.photoUrl || person.img).slice(0, 2048) : '',
     pendingIce: [],
   };
   renderCallModal(call, false);
@@ -274,7 +288,7 @@ async function startKindredCall(person, mediaType, matchId) {
     await joinCallRoom(socket, matchId);
     await acquireCallMedia(call);
     createCallPeer(call);
-    const started = await sendCallSignal(socket, matchId, 'start', { mediaType: call.mediaType, name: state.profile?.name || 'Your match' });
+    const started = await sendCallSignal(socket, matchId, 'start', { mediaType: call.mediaType, name: state.profile?.name || 'Your match', photoUrl: state.profile?.img || '' });
     call.callId = started.callId;
     call.ringTimer = setTimeout(() => {
       if (activeKindredCall === call && !call.answered) {
@@ -297,6 +311,7 @@ async function endKindredCall(notifyRemote, reason = 'ended') {
   if (!call) return;
   activeKindredCall = null;
   clearTimeout(call.ringTimer);
+  clearInterval(call.durationTimer);
   if (notifyRemote && call.socket?.connected) await sendCallSignal(call.socket, call.matchId, 'end', { reason }, call.callId).catch(() => {});
   call.peerConnection?.close();
   call.localStream?.getTracks().forEach((track) => track.stop());
