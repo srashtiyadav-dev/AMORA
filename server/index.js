@@ -437,6 +437,18 @@ app.get('/api/matches/:matchId/messages', requireAuth, async (req, res, next) =>
   } catch (error) { return next(error); }
 });
 
+app.get('/api/matches/:matchId/calls', requireAuth, async (req, res, next) => {
+  if (!await matchMembership(req.params.matchId, req.userId)) return jsonError(res, 404, 'Conversation not found.');
+  try {
+    const { rows } = await pool.query(`SELECT id, match_id AS "matchId", caller_id AS "callerId",
+      recipient_id AS "recipientId", media_type AS "mediaType", status,
+      started_at AS "startedAt", answered_at AS "answeredAt", ended_at AS "endedAt",
+      duration_seconds AS "durationSeconds"
+      FROM call_logs WHERE match_id=$1 ORDER BY started_at DESC LIMIT 50`, [req.params.matchId]);
+    return res.json({ calls: rows.reverse() });
+  } catch (error) { return next(error); }
+});
+
 async function saveMessage(matchId, senderId, body) {
   const { rows } = await pool.query(`INSERT INTO messages (match_id,sender_id,body) VALUES ($1,$2,$3)
     RETURNING id,match_id AS "matchId",sender_id AS "senderId",body,created_at AS "createdAt"`, [matchId, senderId, body]);
@@ -530,6 +542,15 @@ io.on('connection', (socket) => {
     } catch { return acknowledge({ ok: false, error: 'Message could not be sent.' }); }
   });
 
+  socket.on('typing:start', async (payload) => {
+    const matchId = payload?.matchId;
+    if (await matchMembership(matchId, socket.data.userId)) socket.to(`match:${matchId}`).emit('typing', { matchId, userId: socket.data.userId, typing: true });
+  });
+  socket.on('typing:stop', async (payload) => {
+    const matchId = payload?.matchId;
+    if (await matchMembership(matchId, socket.data.userId)) socket.to(`match:${matchId}`).emit('typing', { matchId, userId: socket.data.userId, typing: false });
+  });
+
   socket.on('call:signal', async (payload, acknowledge = () => {}) => {
     const matchId = payload?.matchId;
     const type = payload?.type;
@@ -538,8 +559,38 @@ io.on('connection', (socket) => {
       return acknowledge({ ok: false, error: 'Call signaling is not allowed.' });
     }
     if (JSON.stringify(data ?? null).length > 20_000) return acknowledge({ ok: false, error: 'Signal payload is too large.' });
-    socket.to(`match:${matchId}`).emit('call:signal', { matchId, type, data, from: socket.data.userId });
-    return acknowledge({ ok: true });
+    try {
+      let callId = payload?.callId || null;
+      if (type === 'start') {
+        const { rows } = await pool.query('SELECT user_a,user_b FROM matches WHERE id=$1', [matchId]);
+        if (!rows[0]) return acknowledge({ ok: false, error: 'Conversation not found.' });
+        const recipientId = rows[0].user_a === socket.data.userId ? rows[0].user_b : rows[0].user_a;
+        const mediaType = data?.mediaType === 'video' ? 'video' : 'voice';
+        const created = await pool.query(`INSERT INTO call_logs (match_id,caller_id,recipient_id,media_type)
+          VALUES ($1,$2,$3,$4) RETURNING id`, [matchId, socket.data.userId, recipientId, mediaType]);
+        callId = created.rows[0].id;
+      } else if (callId) {
+        if (!UUID.test(callId)) return acknowledge({ ok: false, error: 'Invalid call.' });
+        if (type === 'ready' || type === 'answer') {
+          await pool.query(`UPDATE call_logs SET status='answered', answered_at=COALESCE(answered_at,now())
+            WHERE id=$1 AND match_id=$2`, [callId, matchId]);
+        } else if (type === 'end') {
+          const reason = data?.reason;
+          await pool.query(`UPDATE call_logs SET status=CASE
+              WHEN $2='no-answer' THEN 'missed' WHEN $2='declined' THEN 'declined'
+              WHEN $2='busy' THEN 'cancelled' WHEN answered_at IS NOT NULL THEN 'completed' ELSE 'cancelled' END,
+            ended_at=now(), duration_seconds=CASE WHEN answered_at IS NULL THEN 0
+              ELSE GREATEST(0,EXTRACT(EPOCH FROM (now()-answered_at))::int) END
+            WHERE id=$1 AND match_id=$3`, [callId, reason, matchId]);
+          io.to(`match:${matchId}`).emit('call:log:update', { matchId });
+        }
+      }
+      socket.to(`match:${matchId}`).emit('call:signal', { matchId, type, data, callId, from: socket.data.userId });
+      return acknowledge({ ok: true, callId });
+    } catch (error) {
+      console.error('Call signal failed:', error.message);
+      return acknowledge({ ok: false, error: 'Could not update the call.' });
+    }
   });
 });
 

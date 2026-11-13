@@ -70,6 +70,20 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_match_created_idx ON messages (match_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS call_logs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  match_id uuid NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+  caller_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  recipient_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  media_type text NOT NULL CHECK (media_type IN ('voice','video')),
+  status text NOT NULL DEFAULT 'ringing' CHECK (status IN ('ringing','answered','missed','declined','completed','cancelled')),
+  started_at timestamptz NOT NULL DEFAULT now(),
+  answered_at timestamptz,
+  ended_at timestamptz,
+  duration_seconds integer NOT NULL DEFAULT 0 CHECK (duration_seconds >= 0)
+);
+CREATE INDEX IF NOT EXISTS call_logs_match_started_idx ON call_logs (match_id, started_at DESC);
+
 CREATE TABLE IF NOT EXISTS blocks (
   blocker_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   blocked_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
