@@ -62,14 +62,26 @@ CREATE TABLE IF NOT EXISTS matches (
   UNIQUE (user_a, user_b)
 );
 
+CREATE TABLE IF NOT EXISTS match_media (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  match_id uuid NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+  sender_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  mime_type text NOT NULL CHECK (mime_type IN ('image/jpeg','image/png','image/webp','video/mp4','video/webm')),
+  media_data bytea NOT NULL CHECK (octet_length(media_data) <= 20971520),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS match_media_match_created_idx ON match_media (match_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS messages (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   match_id uuid NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
   sender_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   body text NOT NULL CHECK (char_length(body) BETWEEN 1 AND 2000),
+  media_id uuid REFERENCES match_media(id) ON DELETE SET NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   read_at timestamptz
 );
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_id uuid REFERENCES match_media(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS messages_match_created_idx ON messages (match_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS call_logs (

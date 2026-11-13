@@ -61,7 +61,7 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-      imgSrc: ["'self'", 'data:', 'https://images.unsplash.com'],
+      imgSrc: ["'self'", 'data:', 'blob:', 'https://images.unsplash.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
       connectSrc: ["'self'", 'ws:', 'wss:', 'stun:', 'turn:', 'turns:'],
       mediaSrc: ["'self'", 'blob:'],
@@ -73,6 +73,7 @@ app.use(express.json({ limit: '24kb', strict: true }));
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 6, standardHeaders: true, legacyHeaders: false });
 const writeLimiter = rateLimit({ windowMs: 60 * 1000, limit: 45, standardHeaders: true, legacyHeaders: false });
+const mediaLimiter = rateLimit({ windowMs: 60 * 1000, limit: 12, standardHeaders: true, legacyHeaders: false });
 
 function jsonError(res, status, message) {
   return res.status(status).json({ error: message });
@@ -452,10 +453,55 @@ app.get('/api/matches/:matchId/messages', requireAuth, async (req, res, next) =>
   const before = req.query.before ? new Date(req.query.before) : null;
   if (before && Number.isNaN(before.getTime())) return jsonError(res, 400, 'Invalid message cursor.');
   try {
-    const { rows } = await pool.query(`SELECT id, match_id AS "matchId", sender_id AS "senderId", body, created_at AS "createdAt"
-      FROM messages WHERE match_id=$1 AND ($2::timestamptz IS NULL OR created_at<$2)
-      ORDER BY created_at DESC LIMIT 50`, [req.params.matchId, before]);
+    const { rows } = await pool.query(`SELECT msg.id, msg.match_id AS "matchId", msg.sender_id AS "senderId",
+      msg.body, msg.created_at AS "createdAt", media.mime_type AS "mediaMimeType",
+      CASE WHEN media.id IS NULL THEN NULL ELSE '/api/matches/' || msg.match_id::text || '/media/' || media.id::text END AS "mediaUrl"
+      FROM messages msg LEFT JOIN match_media media ON media.id=msg.media_id
+      WHERE msg.match_id=$1 AND ($2::timestamptz IS NULL OR msg.created_at<$2)
+      ORDER BY msg.created_at DESC LIMIT 50`, [req.params.matchId, before]);
     return res.json({ messages: rows.reverse() });
+  } catch (error) { return next(error); }
+});
+
+app.post('/api/matches/:matchId/media', requireAuth, mediaLimiter,
+  express.raw({ type: ['image/jpeg','image/png','image/webp','video/mp4','video/webm'], limit: '20mb' }),
+  async (req, res, next) => {
+    const matchId = req.params.matchId;
+    const mimeType = req.get('content-type')?.split(';')[0].trim().toLowerCase();
+    const mediaData = req.body;
+    if (!['image/jpeg','image/png','image/webp','video/mp4','video/webm'].includes(mimeType) || !Buffer.isBuffer(mediaData) || !mediaData.length) {
+      return jsonError(res, 400, 'Choose a JPEG, PNG, WebP, MP4, or WebM file.');
+    }
+    if (mediaData.length > 20 * 1024 * 1024) return jsonError(res, 413, 'Media must be under 20 MB.');
+    if (!await matchMembership(matchId, req.userId)) return jsonError(res, 404, 'Conversation not found.');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const stored = await client.query(`INSERT INTO match_media (match_id,sender_id,mime_type,media_data)
+        VALUES ($1,$2,$3,$4) RETURNING id`, [matchId, req.userId, mimeType, mediaData]);
+      const mediaId = stored.rows[0].id;
+      const body = mimeType.startsWith('video/') ? 'Shared a video' : 'Shared a photo';
+      const { rows } = await client.query(`INSERT INTO messages (match_id,sender_id,body,media_id)
+        VALUES ($1,$2,$3,$4) RETURNING id,match_id AS "matchId",sender_id AS "senderId",body,created_at AS "createdAt"`,
+      [matchId, req.userId, body, mediaId]);
+      await client.query('COMMIT');
+      const message = { ...rows[0], mediaMimeType: mimeType, mediaUrl: `/api/matches/${matchId}/media/${mediaId}` };
+      io.to(`match:${matchId}`).emit('message:new', message);
+      return res.status(201).json({ message });
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      return next(error);
+    } finally { client.release(); }
+  });
+
+app.get('/api/matches/:matchId/media/:mediaId', requireAuth, async (req, res, next) => {
+  const { matchId, mediaId } = req.params;
+  if (!UUID.test(mediaId) || !await matchMembership(matchId, req.userId)) return jsonError(res, 404, 'Media not found.');
+  try {
+    const { rows } = await pool.query('SELECT mime_type,media_data FROM match_media WHERE id=$1 AND match_id=$2', [mediaId, matchId]);
+    if (!rows.length) return jsonError(res, 404, 'Media not found.');
+    res.set({ 'Content-Type': rows[0].mime_type, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
+    return res.send(rows[0].media_data);
   } catch (error) { return next(error); }
 });
 

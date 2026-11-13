@@ -31,6 +31,8 @@ let state = JSON.parse(localStorage.getItem('kindred-state')||'null') || {stage:
 const BACKEND_ENABLED = window.KINDRED_CONFIG?.backend === true;
 const apiToken = () => sessionStorage.getItem('kindred-token') || '';
 let realtimeSocket = null;
+const chatMediaObjectUrls = new Map();
+let chatMediaObserver = null;
 async function apiRequest(path,options={}){const headers={'Content-Type':'application/json',...(options.headers||{})};if(apiToken())headers.Authorization=`Bearer ${apiToken()}`;const response=await fetch(`/api${path}`,{...options,headers,body:options.body===undefined?undefined:JSON.stringify(options.body)});const data=response.status===204?{}:await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||`Request failed (${response.status}).`);return data}
 function fromApiProfile(p){if(!p)return null;return{id:p.id,name:p.displayName,age:p.age,birthDate:p.birthDate||'',gender:p.gender,looking:Array.isArray(p.interestedIn)?p.interestedIn[0]||'Everyone':p.looking||'Everyone',relation:p.relationshipGoal||p.relation,city:p.city||'',bio:p.bio||'',tags:p.interests||p.tags||[],img:p.photoUrl||p.img||'',avatar:p.avatar||'',interestedIn:p.interestedIn||[],chemistryAnswers:p.chemistryAnswers||{},personalityTwin:p.personalityTwin||''}}
 function getAge(birthDate){if(!birthDate)return 0;const d=new Date(`${birthDate}T00:00:00Z`),now=new Date();let age=now.getUTCFullYear()-d.getUTCFullYear();if(now.getUTCMonth()<d.getUTCMonth()||(now.getUTCMonth()===d.getUTCMonth()&&now.getUTCDate()<d.getUTCDate()))age--;return Number.isFinite(age)?age:0}
@@ -80,6 +82,7 @@ async function boot(){if(BACKEND_ENABLED){if(!apiToken()){state.stage='login'}el
 boot();
 
 async function renderApiMessages(v,options={}){
+ chatMediaObserver?.disconnect();chatMediaObserver=null;for(const source of chatMediaObjectUrls.values())URL.revokeObjectURL(source);chatMediaObjectUrls.clear();
  const oldMessages=v.querySelector('#messages');const oldTop=oldMessages?.scrollTop||0;const oldHeight=oldMessages?.scrollHeight||0;
  v.innerHTML='<div class="empty-state"><p>Loading conversations…</p></div>';
  try{
@@ -92,8 +95,12 @@ async function renderApiMessages(v,options={}){
   const messages=messageResult.messages||[],calls=callResult.calls||[];
   const events=[...messages.map(item=>({...item,eventType:'message',at:item.createdAt})),...calls.map(item=>({...item,eventType:'call',at:item.startedAt}))].sort((a,b)=>new Date(a.at)-new Date(b.at));
   v.innerHTML=`<div class="section-title"><div><div class="eyebrow">Good conversations happen here</div><h1>Messages.</h1><p>Say something kind. See where it goes.</p></div></div><div class="chat-layout"><aside class="chat-list"><h3>Matches</h3>${matches.map(m=>`<button class="chat-person ${m.id===selected.id?'active':''}" data-chat-id="${m.id}"><img src="${remoteImage(m,120)}" alt=""><div><strong>${escapeHtml(m.displayName)}</strong><small>${escapeHtml(m.lastMessage?.body||'Start a conversation')}</small></div></button>`).join('')}</aside><section class="chat-window"><header class="chat-head"><div class="chat-head-person"><img src="${remoteImage(selected,120)}" alt=""><div><strong>${escapeHtml(selected.displayName)}</strong><small id="typing-status">● &nbsp;Matched on Kindred</small></div></div><div class="call-actions"><button class="icon-btn" id="voice-call" aria-label="Start voice call" title="Start a voice call">☎</button><button class="icon-btn" id="video-call" aria-label="Start video call" title="Start a video call">▣</button></div></header><div class="messages" id="messages">${events.map(item=>{const time=new Date(item.at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});if(item.eventType==='message')return `<div class="message ${item.senderId===state.profile?.id?'mine':''}">${escapeHtml(item.body)}<time>${time}</time></div>`;const missed=item.status==='missed',outgoing=item.callerId===state.profile?.id,label=missed?'Missed call':item.status==='declined'?'Declined call':item.status==='cancelled'?'Call cancelled':item.status==='completed'?`${item.mediaType==='video'?'Video':'Voice'} call`:outgoing?'Outgoing call':'Incoming call';const duration=item.durationSeconds?` · ${Math.floor(item.durationSeconds/60)}:${String(item.durationSeconds%60).padStart(2,'0')}`:'';return `<div class="call-history ${outgoing?'outgoing':'incoming'} ${missed?'missed':''}"><span class="call-history-icon">${item.mediaType==='video'?'▣':'☎'}</span><span><strong>${label}</strong><small>${item.mediaType==='video'?'Video':'Voice'}${duration}</small></span><time>${time}</time></div>`}).join('')}</div><form class="chat-compose" id="compose"><input id="message-input" placeholder="Write a kind hello…" autocomplete="off" aria-label="Message"><button type="submit">Send</button></form></section></div>`;
+  const messageItems=events.filter(item=>item.eventType==='message'),messageNodes=v.querySelectorAll('.message');
+  chatMediaObserver='IntersectionObserver' in window?new IntersectionObserver(entries=>entries.forEach(entry=>{const item=entry.target._chatMediaItem;if(!item)return;entry.target._mediaVisible=entry.isIntersecting;if(entry.isIntersecting)loadChatMedia(item,entry.target);else releaseChatMedia(item,entry.target)}),{root:v.querySelector('#messages'),rootMargin:'180px 0px'}):null;
+  messageItems.forEach((item,index)=>{if(!item.mediaUrl)return;const node=messageNodes[index];if(!node)return;const time=node.querySelector('time');node.textContent='';node.classList.add('media-message');let media;if(item.mediaMimeType?.startsWith('video/')){media=document.createElement('video');media.controls=true;media.playsInline=true;media.preload='metadata';media.setAttribute('aria-label','Video attachment')}else{media=document.createElement('img');media.alt='Shared photo'}media.className='chat-media';media._chatMediaItem=item;node.append(media);if(time)node.append(time);if(chatMediaObserver)chatMediaObserver.observe(media);else{media._mediaVisible=true;loadChatMedia(item,media)}});
   v.querySelectorAll('.message').forEach(message=>{if(message.textContent.includes('🎲 Truth or Dare'))message.classList.add('game-message')});
   const gameLauncher=document.createElement('button');gameLauncher.type='button';gameLauncher.className='truth-dare-launcher';gameLauncher.innerHTML='<span>🎲</span><span><strong>Truth or Dare</strong><small>A low-pressure way to break the ice</small></span><span class="launcher-arrow">→</span>';document.querySelector('.chat-compose').before(gameLauncher);gameLauncher.onclick=()=>openTruthDareGame(selected.displayName,async prompt=>{await apiRequest(`/matches/${selected.id}/messages`,{method:'POST',body:{body:prompt}});renderApiMessages(v)});
+  addChatMediaPicker(document.querySelector('.chat-compose'),selected.id,v);
   const messagePane=document.getElementById('messages'),scrollLatest=document.createElement('button');scrollLatest.type='button';scrollLatest.className='scroll-latest';scrollLatest.innerHTML='↓ <span>Latest</span>';scrollLatest.setAttribute('aria-label','Scroll to latest message');document.querySelector('.chat-window').append(scrollLatest);
   const updateScrollButton=()=>{const gap=messagePane.scrollHeight-messagePane.scrollTop-messagePane.clientHeight;scrollLatest.classList.toggle('visible',gap>100)};
   messagePane.addEventListener('scroll',updateScrollButton,{passive:true});scrollLatest.onclick=()=>messagePane.scrollTo({top:messagePane.scrollHeight,behavior:'smooth'});
@@ -107,6 +114,46 @@ async function renderApiMessages(v,options={}){
   document.getElementById('compose').onsubmit=async event=>{event.preventDefault();const body=input.value.trim();if(!body)return;clearTimeout(typingTimer);socket?.emit('typing:stop',{matchId:selected.id});try{await apiRequest(`/matches/${selected.id}/messages`,{method:'POST',body:{body}});renderApiMessages(v)}catch(error){notify(error.message)}};
   document.getElementById('voice-call').onclick=()=>openCall({name:selected.displayName,photoUrl:selected.avatar?avatarImage(selected.avatar):selected.photoUrl},'voice');document.getElementById('video-call').onclick=()=>openCall({name:selected.displayName,photoUrl:selected.avatar?avatarImage(selected.avatar):selected.photoUrl},'video');
  }catch(error){if(v.isConnected)v.innerHTML=`<div class="empty-state"><h2>Couldn’t load messages.</h2><p>${escapeHtml(error.message)}</p></div>`}
+}
+
+async function loadChatMedia(item,element){
+ try{
+  let source=chatMediaObjectUrls.get(item.id);
+  if(!source){const response=await fetch(item.mediaUrl,{headers:{Authorization:`Bearer ${apiToken()}`}});if(!response.ok)throw new Error('Attachment unavailable.');source=URL.createObjectURL(await response.blob());chatMediaObjectUrls.set(item.id,source);while(chatMediaObjectUrls.size>24){const [oldId,oldUrl]=chatMediaObjectUrls.entries().next().value;URL.revokeObjectURL(oldUrl);chatMediaObjectUrls.delete(oldId)}}
+  if(!element.isConnected){URL.revokeObjectURL(source);chatMediaObjectUrls.delete(item.id);return}
+  if(element._mediaVisible!==false)element.src=source;else releaseChatMedia(item,element);
+ }catch{if(element.isConnected){const unavailable=document.createElement('span');unavailable.className='media-unavailable';unavailable.textContent='Attachment unavailable';element.replaceWith(unavailable)}}
+}
+
+function releaseChatMedia(item,element){
+ const source=chatMediaObjectUrls.get(item.id);if(!source||(element.src&&element.src!==source))return;
+ if(element.tagName==='VIDEO'){element.pause();element.removeAttribute('src');element.load()}
+ else element.removeAttribute('src');
+ URL.revokeObjectURL(source);chatMediaObjectUrls.delete(item.id);
+}
+
+async function prepareChatImage(file){
+ const bitmap=await createImageBitmap(file);const scale=Math.min(1,1600/Math.max(bitmap.width,bitmap.height));const canvas=document.createElement('canvas');canvas.width=Math.round(bitmap.width*scale);canvas.height=Math.round(bitmap.height*scale);canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close();return new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.82));
+}
+
+function addChatMediaPicker(form,matchId,view){
+ const button=document.createElement('button');button.type='button';button.className='chat-attach-btn';button.textContent='＋';button.setAttribute('aria-label','Attach a photo or video');button.title='Attach a photo or video';
+ const picker=document.createElement('input');picker.type='file';picker.accept='image/jpeg,image/png,image/webp,video/mp4,video/webm';picker.hidden=true;picker.setAttribute('aria-label','Choose a photo or video');
+ form.insertBefore(button,form.querySelector('#message-input'));form.append(picker);
+ button.onclick=()=>picker.click();
+ picker.onchange=async()=>{
+  const file=picker.files?.[0];picker.value='';if(!file)return;
+  if(!['image/jpeg','image/png','image/webp','video/mp4','video/webm'].includes(file.type))return notify('Choose a JPEG, PNG, WebP, MP4, or WebM file.');
+  if(file.size>20*1024*1024)return notify('Choose media under 20 MB.');
+  button.disabled=true;button.classList.add('uploading');notify('Preparing your media…');
+  try{
+   let payload=file,mimeType=file.type;
+   if(file.type.startsWith('image/')){payload=await prepareChatImage(file);if(!payload)throw new Error('Could not prepare that image.');mimeType='image/jpeg';if(payload.size>20*1024*1024)throw new Error('Choose a smaller image.')}
+   const response=await fetch(`/api/matches/${matchId}/media`,{method:'POST',headers:{Authorization:`Bearer ${apiToken()}`,'Content-Type':mimeType},body:payload});
+   const result=await response.json().catch(()=>({}));if(!response.ok)throw new Error(result.error||'Could not send that media.');
+   renderApiMessages(view);
+  }catch(error){notify(error.message||'Could not send that media.')}finally{button.disabled=false;button.classList.remove('uploading')}
+ };
 }
 
 const truthDarePrompts={
